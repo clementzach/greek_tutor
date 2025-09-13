@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Vocab Set {{ set_id }}</h1>
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Greek</th><th>Common English glosses</th></tr>
+      </thead>
+      <tbody>
+        {% for e in entries %}
+        <tr>
+          <td>{{ e.word }}</td>
+          <td>{{ e.glosses }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="2" class="muted">No words in this set.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="actions" style="margin-top:.5rem;">
+    <a class="button" href="/dashboard">Back to Dashboard</a>
+  </div>
+</div>
+{% endblock %}
+

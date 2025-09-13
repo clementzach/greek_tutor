@@ -1,0 +1,8 @@
+[Unit]
+Description=Greek Tutor Stack
+Requires=greek-tutor-fastapi.service greek-tutor-flask.service
+After=network.target
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,129 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Tutor</h1>
+<div class="tutor-layout">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="title">Chats</div>
+      <form method="post" action="/new_chat" style="margin:0">
+        <button type="submit">New Chat</button>
+      </form>
+    </div>
+    <ul class="chat-list">
+      {% for s in sessions %}
+        <li>
+          <a href="/tutor?sid={{ s.id }}" class="chat-link">
+            <div class="chat-summary">{{ s.title or s.summary or 'New chat' }}</div>
+            <div class="chat-date">{{ (s.updated_at or s.created_at)[:10] }}</div>
+          </a>
+          <div class="chat-actions">
+            <button type="button" onclick="renameChat('{{ s.id }}')">Rename</button>
+            <form method="post" action="/delete_chat" style="display:inline" onsubmit="return confirm('Delete this chat?')">
+              <input type="hidden" name="sid" value="{{ s.id }}">
+              <button type="submit" class="danger">Delete</button>
+            </form>
+          </div>
+        </li>
+      {% else %}
+        <li class="muted">No past chats yet.</li>
+      {% endfor %}
+    </ul>
+  </aside>
+  <section class="main">
+{% if quiz %}
+  <div class="card quiz">
+    <div class="quiz-header">
+      <strong>Quiz</strong>
+      <span class="muted">Progress: {{ quiz.asked }}/{{ quiz.total }} | Remaining: {{ quiz.remaining }}</span>
+    </div>
+    {% if quiz.question %}
+      <div class="quiz-question">{{ quiz.question }}</div>
+    {% else %}
+      <div class="quiz-question muted">Preparing next question...</div>
+    {% endif %}
+    <form method="post" class="inline" id="quiz-form" style="margin-top:.5rem;">
+      <input type="hidden" name="action" value="answer_quiz">
+      <textarea name="message" id="quiz-answer" rows="2" placeholder="Type your answer and press Enter (Shift+Enter newline)"></textarea>
+      <div style="display:flex; gap:.5rem;">
+        <button type="submit">Submit Answer</button>
+        <button type="submit" name="action" value="end_quiz">End Quiz</button>
+      </div>
+    </form>
+  </div>
+{% endif %}
+<div class="chat">
+  {% for m in chat %}
+    <div class="msg {{ m.role }}">
+      <div class="role">{{ m.role }}</div>
+      <div class="content markdown">{{ m.html|safe }}</div>
+    </div>
+  {% endfor %}
+</div>
+
+<form method="post" class="chat-input" id="chat-form">
+  <textarea name="message" id="chat-message" rows="3" placeholder="Ask about a concept or practice vocab... (Shift+Enter for newline)"></textarea>
+  <button type="submit">Send</button>
+</form>
+<script>
+  (function(){
+    const form = document.getElementById('chat-form');
+    const ta = document.getElementById('chat-message');
+    if (form && ta) {
+      ta.addEventListener('keydown', function(e){
+        if (e.isComposing) return; // IME input in progress
+        if (e.key === 'Enter') {
+          if (e.shiftKey) {
+            // Allow newline
+            return;
+          }
+          e.preventDefault();
+          if (form.requestSubmit) form.requestSubmit(); else form.submit();
+        }
+      });
+    }
+  })();
+  (function(){
+    const form = document.getElementById('quiz-form');
+    const ta = document.getElementById('quiz-answer');
+    if (form && ta) {
+      ta.addEventListener('keydown', function(e){
+        if (e.isComposing) return;
+        if (e.key === 'Enter') {
+          if (e.shiftKey) return;
+          e.preventDefault();
+          if (form.requestSubmit) form.requestSubmit(); else form.submit();
+        }
+      });
+    }
+  })();
+  </script>
+  </section>
+</div>
+<form method="post" action="/rename_chat" id="rename-form" style="display:none">
+  <input type="hidden" name="sid" id="rename-sid">
+  <input type="hidden" name="title" id="rename-title">
+</form>
+<script>
+  function renameChat(sid){
+    const title = prompt('New chat name:');
+    if(!title) return;
+    const f = document.getElementById('rename-form');
+    document.getElementById('rename-sid').value = sid;
+    document.getElementById('rename-title').value = title;
+    if (f.requestSubmit) f.requestSubmit(); else f.submit();
+  }
+  // Best-effort autosummarize when leaving Tutor
+  (function(){
+    const payload = JSON.stringify({ ts: Date.now() });
+    function send(){
+      if (navigator.sendBeacon) {
+        const blob = new Blob([payload], {type: 'application/json'});
+        navigator.sendBeacon('/autosummarize', blob);
+      } else {
+        fetch('/autosummarize', {method:'POST', headers:{'Content-Type':'application/json'}, body: payload}).catch(()=>{});
+      }
+    }
+    window.addEventListener('beforeunload', send);
+  })();
+</script>
+{% endblock %}

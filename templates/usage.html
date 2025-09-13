@@ -1,0 +1,72 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Usage Guide</h1>
+<div class="card">
+  <p>This guide shows examples of what you can ask the tutor to do. Write naturally — the agent understands plain English. When helpful, it will use tools to fetch data or perform actions.</p>
+</div>
+
+<div class="card">
+  <h3>Concepts & Explanations</h3>
+  <ul>
+    <li>Explain a concept: “Explain the aorist tense with beginner-friendly examples.”</li>
+    <li>Ask follow‑ups: “How is the genitive used with πίστις?”</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>Greek NT & KJV Passages</h3>
+  <ul>
+    <li>Get GNT verses: “Show John 1:1–3 in Greek.”</li>
+    <li>Get KJV verses: “Give me the KJV for John 1:1–3.”</li>
+    <li>Align and explain: “Explain how John 1:1 maps from Greek to KJV, word by word.”</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>Vocabulary</h3>
+  <ul>
+    <li>Generate vocab — global: “Add the top 20 most common NT words to my vocab.”</li>
+    <li>Generate vocab — by book: “Add 30 common words from Galatians.”</li>
+    <li>Generate vocab — by chapter: “Add 15 common words from John 3.”</li>
+    <li>Review suggestions: “Give me relevant vocabulary to review.”</li>
+    <li>Record mastery explicitly after a session: “Mark that I’ve mastered the concept ‘Present Active Indicative.’”</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>Record Interests</h3>
+  <ul>
+    <li>Topics: “I’m interested in parsing participles.”</li>
+    <li>Books/Chapters: “I want to study Galatians” or “Focus on John 3.”</li>
+    <li>Passages: “I’m interested in John 3:16–18.”</li>
+  </ul>
+  <p>These are stored so the tutor can tailor examples and vocab. You can also record them on the Dashboard.</p>
+  
+</div>
+
+<div class="card">
+  <h3>Quiz Mode</h3>
+  <ul>
+    <li>Start a vocab quiz: “Quiz me on vocabulary in Galatians.”</li>
+    <li>Answer in English; the tutor grades answers as correct/partial/incorrect and tracks progress.</li>
+    <li>End anytime: “End quiz.”</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>Account & Level</h3>
+  <ul>
+    <li>Set level (explicit only): “Set my level to Beginner” or “I am B1.”</li>
+    <li>Note: The tutor will not change your level based on quiz answers.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>Troubleshooting</h3>
+  <ul>
+    <li>If passages don’t load, ensure the datasets are downloaded (Dashboard → run the download script or see README).</li>
+    <li>If vocab generation inserts 0 words, try a different scope, increase count, or ensure the full GNT is installed.</li>
+  </ul>
+</div>
+{% endblock %}
+

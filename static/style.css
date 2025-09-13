@@ -1,0 +1,64 @@
+:root { --bg:#0f0f12; --fg:#e8e8ee; --muted:#9aa0a6; --card:#17171c; --primary:#6ca0ff; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+.container { max-width: 900px; margin: 0 auto; padding: 1rem; }
+nav { background: #131318; border-bottom: 1px solid #1f2030; }
+nav .brand { color:var(--fg); text-decoration:none; font-weight:700; }
+nav .nav-links { float:right; }
+nav a { color:var(--muted); margin-left: 1rem; text-decoration: none; }
+main h1 { margin: 1rem 0; }
+form { display:flex; flex-direction: column; gap: .5rem; }
+input, textarea { background: #0f0f15; color: var(--fg); border: 1px solid #2a2a3a; border-radius: 6px; padding: .6rem .7rem; }
+button, .button { background: var(--primary); color: #0a0a0f; border: none; border-radius: 6px; padding: .6rem 1rem; cursor:pointer; font-weight:600; text-decoration: none; width: fit-content; }
+.card { background: var(--card); border:1px solid #222334; padding: 1rem; border-radius: 8px; }
+.actions { margin-top: 1rem; }
+.flashes { list-style: none; padding:0; }
+.flashes li { margin: .5rem 0; padding: .5rem .75rem; border-radius:6px; }
+.flashes .error { background:#3a1a1a; color:#ffdede; }
+.flashes .success { background:#183a1a; color:#d9ffde; }
+.chat { display:flex; flex-direction: column; gap:.5rem; margin-bottom: 1rem; }
+.msg { background: var(--card); border:1px solid #222334; padding:.6rem .8rem; border-radius:8px; }
+.msg .role { font-size:.75rem; color:var(--muted); margin-bottom:.25rem; text-transform:uppercase; letter-spacing:.08em; }
+.msg.user { border-left: 4px solid #5bd1a4; }
+.msg.assistant { border-left: 4px solid var(--primary); }
+.chat-input { position: sticky; bottom: 0; background: #0f0f12; padding-bottom: 1rem; }
+.inline { display:flex; gap:.5rem; align-items:center; }
+.latest-reply { margin-top:.5rem; color: var(--muted); font-size:.9rem; }
+
+/* Markdown styling */
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 { margin: .6rem 0 .4rem; }
+.markdown p { margin: .4rem 0; }
+.markdown pre { background:#0c0c12; padding:.6rem .8rem; border-radius:6px; overflow:auto; border:1px solid #1f2030; }
+.markdown code { background:#14141b; padding:.1rem .3rem; border-radius:4px; border:1px solid #222334; }
+.markdown table { width:100%; border-collapse: collapse; margin: .5rem 0; }
+.markdown th, .markdown td { border:1px solid #27283a; padding:.4rem .5rem; }
+.markdown blockquote { border-left:3px solid #3a3b54; padding-left:.6rem; color:#bac0c6; }
+
+/* Interests & Vocab UI */
+.grid { display:grid; grid-template-columns: 1fr; gap: 1rem; }
+@media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+.row { display:flex; gap:.5rem; flex-wrap: wrap; }
+.col { flex:1 1 180px; min-width: 180px; }
+.radio-row { display:flex; gap:1rem; margin-bottom:.5rem; }
+.checkbox { margin:.5rem 0; color: var(--muted); }
+.table-wrap { overflow-x:auto; }
+.muted { color: var(--muted); }
+.button.danger, button.danger { background:#d66; color:#140a0a; }
+.quiz { margin-bottom: 1rem; }
+.quiz-header { display:flex; justify-content: space-between; align-items:center; margin-bottom:.5rem; }
+.quiz-question { font-size:1.1rem; margin:.25rem 0 .5rem; }
+.tutor-layout { display:flex; gap:1rem; }
+.sidebar { width: 260px; flex: 0 0 260px; }
+.main { flex: 1 1 auto; }
+.sidebar .sidebar-header { display:flex; justify-content: space-between; align-items:center; margin-bottom:.5rem; }
+.chat-list { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:.25rem; max-height: 60vh; overflow:auto; }
+.chat-link { display:block; padding:.4rem .5rem; background: var(--card); border:1px solid #222334; border-radius:6px; text-decoration:none; color: var(--fg); }
+.chat-link:hover { border-color: var(--primary); }
+.chat-summary { font-size:.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-date { font-size:.75rem; color: var(--muted); }
+.chat-actions { margin-top: .25rem; display:flex; gap:.25rem; }
+@media (max-width: 900px) {
+  .tutor-layout { flex-direction: column; }
+  .sidebar { width: 100%; }
+}
+.hidden { display: none; }

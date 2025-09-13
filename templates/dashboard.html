@@ -1,0 +1,211 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Dashboard</h1>
+<div class="card">
+  <h3>Your Level</h3>
+  <form method="post" action="/set_level" class="inline">
+    <input type="text" name="level" placeholder="e.g., Beginner, A1, Intermediate" value="{{ level or '' }}">
+    <button type="submit">Save</button>
+  </form>
+</div>
+<div class="actions">
+  <a class="button" href="/tutor">Start Tutoring</a>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h3>Record Interest</h3>
+    <form method="post" action="/interests" id="interest-form">
+      <label>Type</label>
+      <div class="radio-row" id="interest-type-row">
+        <label><input type="radio" name="interest_type" value="topic" checked> Topic</label>
+        <label><input type="radio" name="interest_type" value="book"> Book</label>
+        <label><input type="radio" name="interest_type" value="chapter"> Chapter</label>
+        <label><input type="radio" name="interest_type" value="passage"> Passage</label>
+      </div>
+      <div class="row">
+        <div class="col">
+          <label>Topic</label>
+          <input type="text" name="topic" id="i_topic" placeholder="e.g., Aorist tense, Faith">
+        </div>
+        <div class="col">
+          <label>Book</label>
+          <select name="book" id="i_book"></select>
+        </div>
+        <div class="col">
+          <label>Chapter</label>
+          <select name="chapter" id="i_chapter"></select>
+        </div>
+        <div class="col">
+          <label>Passage Ref (optional verses)</label>
+          <input type="text" name="passage_ref" id="i_passage_ref" placeholder="e.g., 16-18">
+        </div>
+      </div>
+      <button type="submit">Save Interest</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3>Generate Vocabulary</h3>
+    <form method="post" action="/generate_vocab" id="generate-form" class="inline-form">
+      <div class="row">
+        <div class="col">
+          <label>Mode</label>
+          <select name="mode" id="mode-select">
+            <option value="global">Global (NT)</option>
+            <option value="book">By Book</option>
+            <option value="chapter">By Chapter</option>
+          </select>
+        </div>
+        <div class="col">
+          <label>Count</label>
+          <input type="number" name="count" min="1" max="200" value="20">
+        </div>
+        <div class="col" id="gv-book-wrap">
+          <label>Book</label>
+          <select name="g_book" id="g_book"></select>
+        </div>
+        <div class="col" id="gv-chap-wrap">
+          <label>Chapter</label>
+          <select name="g_chapter" id="g_chapter"></select>
+        </div>
+      </div>
+      <label class="checkbox"><input type="checkbox" name="normalize" checked> Normalize (lowercase, strip diacritics)</label>
+      <button type="submit">Generate & Insert</button>
+    </form>
+  </div>
+
+  
+</div>
+
+<div class="card">
+  <h3>Summary</h3>
+  <div class="table-wrap">
+    <form method="post" action="/start_quiz_from_sets" id="start-quiz-sets">
+      <table>
+        <thead>
+          <tr><th colspan="8" style="text-align:left">Vocab Sets Generated</th></tr>
+          <tr><th>Select</th><th>When</th><th>Mode</th><th>Book</th><th>Chapter</th><th>Requested</th><th>Inserted</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          {% for vs in vocab_sets %}
+          <tr>
+            <td><input type="checkbox" name="set_ids" value="{{ vs.id }}"></td>
+            <td>{{ (vs.created_at or '')[:10] }}</td>
+            <td>{{ vs.mode }}</td>
+            <td>{{ vs.book or '' }}</td>
+            <td>{{ vs.chapter or '' }}</td>
+            <td>{{ vs.count_requested }}</td>
+            <td>{{ vs.count_inserted }}</td>
+            <td>
+              <a class="button" href="/vocab_set/{{ vs.id }}">View</a>
+              <form method="post" action="/delete_vocab_set" style="display:inline; margin-left:.25rem;" onsubmit="return confirm('Remove this set?');">
+                <input type="hidden" name="set_id" value="{{ vs.id }}">
+                <button type="submit" class="danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="muted">No vocab sets generated yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div style="margin-top:.5rem; display:flex; gap:.5rem; align-items:center;">
+        <label>Limit questions</label>
+        <input type="number" name="limit" min="1" max="200" value="20" style="width:6rem;">
+        <button type="submit">Start Quiz from Selected Sets</button>
+      </div>
+    </form>
+  </div>
+  <div class="table-wrap" style="margin-top:1rem;">
+    <table>
+      <thead>
+        <tr><th colspan="6" style="text-align:left">Your Interests</th></tr>
+        <tr><th>When</th><th>Type</th><th>Topic</th><th>Book</th><th>Chapter</th><th>Passage</th></tr>
+      </thead>
+      <tbody>
+        {% for it in interests %}
+        <tr>
+          <td>{{ it.created_at or '' }}</td>
+          <td>{{ it.interest_type }}</td>
+          <td>{{ it.topic or '' }}</td>
+          <td>{{ it.book or '' }}</td>
+          <td>{{ it.chapter or '' }}</td>
+          <td>{{ it.passage_ref or '' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">No interests yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  // Shared NT book list and helpers
+  const NT = [
+    ['Matthew',28],['Mark',16],['Luke',24],['John',21],['Acts',28],['Romans',16],
+    ['1 Corinthians',16],['2 Corinthians',13],['Galatians',6],['Ephesians',6],
+    ['Philippians',4],['Colossians',4],['1 Thessalonians',5],['2 Thessalonians',3],
+    ['1 Timothy',6],['2 Timothy',4],['Titus',3],['Philemon',1],['Hebrews',13],
+    ['James',5],['1 Peter',5],['2 Peter',3],['1 John',5],['2 John',1],['3 John',1],
+    ['Jude',1],['Revelation',22]
+  ];
+  function populateBooks(selectEl) {
+    selectEl.innerHTML = '';
+    const opt = document.createElement('option'); opt.value = ''; opt.textContent = '— Select —'; selectEl.appendChild(opt);
+    for (const [name] of NT) { const o = document.createElement('option'); o.value = name; o.textContent = name; selectEl.appendChild(o); }
+  }
+  function populateChapters(selectEl, book) {
+    selectEl.innerHTML = '';
+    const opt = document.createElement('option'); opt.value=''; opt.textContent='—'; selectEl.appendChild(opt);
+    const entry = NT.find(x => x[0] === book); const max = entry ? entry[1] : 0;
+    for (let i=1; i<=max; i++) { const o=document.createElement('option'); o.value=String(i); o.textContent=String(i); selectEl.appendChild(o); }
+  }
+
+  // Interest form setup
+  const iTypeRow = document.getElementById('interest-type-row');
+  const iTopic = document.getElementById('i_topic');
+  const iBook = document.getElementById('i_book');
+  const iChap = document.getElementById('i_chapter');
+  const iPass = document.getElementById('i_passage_ref');
+  populateBooks(iBook);
+  iBook.addEventListener('change', () => populateChapters(iChap, iBook.value));
+  populateChapters(iChap, iBook.value);
+  function syncInterestFields() {
+    const type = document.querySelector('input[name="interest_type"]:checked').value;
+    iTopic.disabled = type !== 'topic';
+    iBook.disabled = !(type === 'book' || type === 'chapter' || type === 'passage');
+    iChap.disabled = !(type === 'chapter' || type === 'passage');
+    iPass.disabled = type !== 'passage';
+  }
+  iTypeRow.addEventListener('change', syncInterestFields); syncInterestFields();
+
+  // Generate vocab form setup
+  const mode = document.getElementById('mode-select');
+  const gBook = document.getElementById('g_book');
+  const gChap = document.getElementById('g_chapter');
+  const gvBookWrap = document.getElementById('gv-book-wrap');
+  const gvChapWrap = document.getElementById('gv-chap-wrap');
+  function clearSelect(sel) { sel.innerHTML = ''; }
+  function ensureBooksPopulated() { if (!gBook.options || gBook.options.length === 0) populateBooks(gBook); }
+  function ensureChaptersPopulated() { if (!gChap.options || gChap.options.length <= 1) populateChapters(gChap, gBook.value); }
+  gBook.addEventListener('change', () => populateChapters(gChap, gBook.value));
+  function syncGenFields() {
+    const m = mode.value;
+    if (m === 'global') {
+      gvBookWrap.classList.add('hidden'); gvChapWrap.classList.add('hidden');
+      gBook.disabled = true; gChap.disabled = true; gBook.value=''; clearSelect(gBook); clearSelect(gChap);
+    } else if (m === 'book') {
+      gvBookWrap.classList.remove('hidden'); gvChapWrap.classList.add('hidden');
+      gBook.disabled = false; gChap.disabled = true; gChap.value=''; clearSelect(gChap); ensureBooksPopulated();
+    } else {
+      gvBookWrap.classList.remove('hidden'); gvChapWrap.classList.remove('hidden');
+      gBook.disabled = false; gChap.disabled = false; ensureBooksPopulated(); ensureChaptersPopulated();
+    }
+  }
+  mode.addEventListener('change', syncGenFields); syncGenFields();
+
+  // No standalone quiz pane; quizzes are started from the Vocab Sets table.
+</script>
+{% endblock %}

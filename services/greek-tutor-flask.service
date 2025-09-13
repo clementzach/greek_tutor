@@ -1,0 +1,19 @@
+[Unit]
+Description=Greek Tutor Flask (Gunicorn)
+After=network.target
+Wants=greek-tutor-fastapi.service
+
+[Service]
+Type=simple
+# Edit these paths before installing:
+WorkingDirectory=/opt/greek_tutor
+EnvironmentFile=/etc/default/greek-tutor
+ExecStart=/bin/bash -lc '"${VENV_DIR}/bin/gunicorn" -w ${FLASK_WORKERS:-2} -b ${FLASK_BIND:-127.0.0.1:5000} flask_app.app:app'
+Restart=on-failure
+RestartSec=3
+# Optionally set a runtime user:
+# User=greek
+
+[Install]
+WantedBy=multi-user.target
+
