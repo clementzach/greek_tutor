@@ -9,7 +9,7 @@
   </form>
 </div>
 <div class="actions">
-  <a class="button" href="/tutor">Start Tutoring</a>
+  <a class="button" href="{{ url_for('tutor') }}">Start Tutoring</a>
 </div>
 
 <div class="grid">
@@ -79,44 +79,22 @@
 </div>
 
 <div class="card">
-  <h3>Summary</h3>
-  <div class="table-wrap">
-    <form method="post" action="/start_quiz_from_sets" id="start-quiz-sets">
-      <table>
-        <thead>
-          <tr><th colspan="8" style="text-align:left">Vocab Sets Generated</th></tr>
-          <tr><th>Select</th><th>When</th><th>Mode</th><th>Book</th><th>Chapter</th><th>Requested</th><th>Inserted</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-          {% for vs in vocab_sets %}
-          <tr>
-            <td><input type="checkbox" name="set_ids" value="{{ vs.id }}"></td>
-            <td>{{ (vs.created_at or '')[:10] }}</td>
-            <td>{{ vs.mode }}</td>
-            <td>{{ vs.book or '' }}</td>
-            <td>{{ vs.chapter or '' }}</td>
-            <td>{{ vs.count_requested }}</td>
-            <td>{{ vs.count_inserted }}</td>
-            <td>
-              <a class="button" href="/vocab_set/{{ vs.id }}">View</a>
-              <form method="post" action="/delete_vocab_set" style="display:inline; margin-left:.25rem;" onsubmit="return confirm('Remove this set?');">
-                <input type="hidden" name="set_id" value="{{ vs.id }}">
-                <button type="submit" class="danger">Delete</button>
-              </form>
-            </td>
-          </tr>
-          {% else %}
-          <tr><td colspan="7" class="muted">No vocab sets generated yet.</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      <div style="margin-top:.5rem; display:flex; gap:.5rem; align-items:center;">
-        <label>Limit questions</label>
-        <input type="number" name="limit" min="1" max="200" value="20" style="width:6rem;">
-        <button type="submit">Start Quiz from Selected Sets</button>
-      </div>
-    </form>
+  <h3>Vocabulary Review</h3>
+  <div style="margin-bottom: 1rem;">
+    <p><strong>Total Vocabulary:</strong> {{ total_vocab }} words</p>
+    <p><strong>Due for Review:</strong> {{ due_count }} cards</p>
   </div>
+
+  {% if due_count > 0 %}
+  <form method="post" action="/start_quiz" style="display:flex; gap:.5rem; align-items:center;">
+    <label>Review</label>
+    <input type="number" name="count" min="1" max="200" value="{{ min(due_count, 20) }}" style="width:6rem;">
+    <span>cards</span>
+    <button type="submit">Start Review</button>
+  </form>
+  {% else %}
+  <p class="muted">No cards due for review. Generate vocabulary below to get started!</p>
+  {% endif %}
   <div class="table-wrap" style="margin-top:1rem;">
     <table>
       <thead>
@@ -205,7 +183,5 @@
     }
   }
   mode.addEventListener('change', syncGenFields); syncGenFields();
-
-  // No standalone quiz pane; quizzes are started from the Vocab Sets table.
 </script>
 {% endblock %}

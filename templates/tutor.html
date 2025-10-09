@@ -12,7 +12,7 @@
     <ul class="chat-list">
       {% for s in sessions %}
         <li>
-          <a href="/tutor?sid={{ s.id }}" class="chat-link">
+          <a href="{{ url_for('tutor', sid=s.id) }}" class="chat-link">
             <div class="chat-summary">{{ s.title or s.summary or 'New chat' }}</div>
             <div class="chat-date">{{ (s.updated_at or s.created_at)[:10] }}</div>
           </a>

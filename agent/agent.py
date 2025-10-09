@@ -14,6 +14,7 @@ MEMORY_DIR = os.path.join(DATA_DIR, 'memory')
 os.makedirs(MEMORY_DIR, exist_ok=True)
 
 from .bible import load_gnt, load_kjv, get_verses, parse_ref, canonical_book, frequency_gnt, load_gnt_samples_as_full, strip_diacritics
+from .spaced_repetition import calculate_next_review, quality_from_verdict, mastery_from_ease_and_interval
 
 def load_memory(user_id: str) -> Dict[str, Any]:
     path = os.path.join(MEMORY_DIR, f"{user_id}.json")
@@ -137,47 +138,60 @@ class GreekTutorAgent:
         })
         return "ok"
 
-    # Quiz tools
-    def tool_start_quiz(self, mode: str = "global", count: int = 10,
+    # Quiz tools with spaced repetition
+    def tool_start_quiz(self, mode: str = "due", count: int = 20,
                         book: Optional[str] = None, chapter: Optional[int] = None,
                         normalize: bool = True) -> Dict[str, Any]:
-        b = canonical_book(book) if book else None
-        ch = chapter if chapter is not None else None
-        if mode == 'chapter' and (not b or ch is None):
-            return {"error": "chapter mode requires book and chapter"}
-        if mode == 'book' and not b:
-            return {"error": "book mode requires book"}
+        """Start a spaced repetition quiz. Mode 'due' uses cards due for review."""
 
-        data = load_gnt()
-        if not data:
-            data = load_gnt_samples_as_full()
-        if not data:
-            return {"error": "GNT dataset not available"}
-
-        if mode == 'global':
-            freq = frequency_gnt(data=data, normalize=normalize)
-        elif mode == 'book':
-            freq = frequency_gnt(data=data, book=b, normalize=normalize)
+        if mode == "due":
+            # Get due cards from database
+            try:
+                due_cards = http_get_json(f"{self.fastapi_url}/vocab/{self.user_id}/due", {"limit": count})
+                if not due_cards:
+                    return {"error": "No cards due for review. Add vocabulary first."}
+                queue = [card['vocab_word'] for card in due_cards]
+            except Exception as e:
+                return {"error": f"Failed to fetch due cards: {e}"}
         else:
-            freq = frequency_gnt(data=data, book=b, chapter=ch, normalize=normalize)
-        if not freq:
-            return {"error": "no words found for scope"}
-        # Exclude obviously non-lexical tokens (very short? still allow particles of length>=1)
-        items = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
-        queue: List[str] = []
-        for w, _f in items:
-            if any(c.isdigit() for c in w):
-                continue
-            if len(queue) >= count:
-                break
-            queue.append(w)
+            # Legacy behavior for book/chapter/global modes
+            b = canonical_book(book) if book else None
+            ch = chapter if chapter is not None else None
+            if mode == 'chapter' and (not b or ch is None):
+                return {"error": "chapter mode requires book and chapter"}
+            if mode == 'book' and not b:
+                return {"error": "book mode requires book"}
+
+            data = load_gnt()
+            if not data:
+                data = load_gnt_samples_as_full()
+            if not data:
+                return {"error": "GNT dataset not available"}
+
+            if mode == 'global':
+                freq = frequency_gnt(data=data, normalize=normalize)
+            elif mode == 'book':
+                freq = frequency_gnt(data=data, book=b, normalize=normalize)
+            else:
+                freq = frequency_gnt(data=data, book=b, chapter=ch, normalize=normalize)
+            if not freq:
+                return {"error": "no words found for scope"}
+
+            items = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
+            queue: List[str] = []
+            for w, _f in items:
+                if any(c.isdigit() for c in w):
+                    continue
+                if len(queue) >= count:
+                    break
+                queue.append(w)
 
         mem = load_memory(self.user_id)
         mem['quiz'] = {
             'active': True,
             'mode': mode,
-            'book': b,
-            'chapter': ch,
+            'book': book,
+            'chapter': chapter,
             'normalize': normalize,
             'queue': queue,
             'asked': 0,
@@ -186,7 +200,7 @@ class GreekTutorAgent:
             'current': None,
         }
         save_memory(self.user_id, mem)
-        return {"status": "started", "total": len(queue), "mode": mode, "book": b, "chapter": ch}
+        return {"status": "started", "total": len(queue), "mode": mode}
 
     def tool_next_quiz_question(self) -> Dict[str, Any]:
         mem = load_memory(self.user_id)
@@ -249,24 +263,54 @@ class GreekTutorAgent:
             expl = payload.get('explanation') or ''
         except Exception:
             pass
+
         # Update stats
         q['asked'] = int(q.get('asked') or 0) + 1
         if verdict == 'correct':
             q['correct'] = int(q.get('correct') or 0) + 1
-            mastery_delta = 0.05
-        elif verdict == 'partial':
-            mastery_delta = 0.02
-        else:
-            mastery_delta = -0.02
-        # Update DB review for token
+
+        # Get current card data from DB
         try:
-            http_post_json(f"{self.fastapi_url}/vocab/increment_review", {
-                "user_id": self.user_id,
-                "vocab_word": token,
-                "mastery_delta": mastery_delta,
-            })
-        except Exception:
+            existing = http_get_json(f"{self.fastapi_url}/vocab/{self.user_id}")
+            card = next((c for c in existing if c.get('vocab_word') == token), None)
+
+            if card:
+                # Use spaced repetition algorithm
+                quality = quality_from_verdict(verdict)
+                sr_data = calculate_next_review(
+                    quality=quality,
+                    ease_factor=card.get('ease_factor', 2.5),
+                    interval_days=card.get('interval_days', 0),
+                    times_reviewed=card.get('times_reviewed', 0)
+                )
+
+                # Calculate mastery from SR parameters
+                mastery_score = mastery_from_ease_and_interval(
+                    sr_data['ease_factor'],
+                    sr_data['interval_days']
+                )
+
+                # Update card with spaced repetition data
+                http_post_json(f"{self.fastapi_url}/vocab", {
+                    "user_id": self.user_id,
+                    "vocab_word": token,
+                    "times_reviewed": sr_data['times_reviewed'],
+                    "mastery_score": mastery_score,
+                    "ease_factor": sr_data['ease_factor'],
+                    "interval_days": sr_data['interval_days'],
+                    "next_review_date": sr_data['next_review_date'],
+                })
+            else:
+                # New card - use increment_review for backward compatibility
+                mastery_delta = 0.05 if verdict == 'correct' else (0.02 if verdict == 'partial' else -0.02)
+                http_post_json(f"{self.fastapi_url}/vocab/increment_review", {
+                    "user_id": self.user_id,
+                    "vocab_word": token,
+                    "mastery_delta": mastery_delta,
+                })
+        except Exception as e:
             pass
+
         q['current'] = None
         mem['quiz'] = q
         save_memory(self.user_id, mem)
@@ -774,12 +818,12 @@ class GreekTutorAgent:
                 "type": "function",
                 "function": {
                     "name": "start_quiz",
-                    "description": "Start a lightweight vocab quiz over Greek tokens (global/book/chapter).",
+                    "description": "Start a spaced repetition vocab quiz. Use mode='due' (default) to review cards due now, or 'global'/'book'/'chapter' for frequency-based practice.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "mode": {"type": "string", "enum": ["global", "book", "chapter"], "default": "global"},
-                            "count": {"type": "integer", "default": 10},
+                            "mode": {"type": "string", "enum": ["due", "global", "book", "chapter"], "default": "due"},
+                            "count": {"type": "integer", "default": 20},
                             "book": {"type": "string"},
                             "chapter": {"type": "integer"},
                             "normalize": {"type": "boolean", "default": True}

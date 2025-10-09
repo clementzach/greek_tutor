@@ -9,8 +9,9 @@ import bleach
 import urllib.request
 import urllib.parse
 
-from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask import Flask, render_template, request, redirect, url_for, session, flash, Blueprint
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 # Ensure project root is importable when running from various CWDs
@@ -70,6 +71,10 @@ def login_required(f):
 def create_app():
     app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'), static_folder=os.path.join(BASE_DIR, 'static'))
     app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key')
+
+    # Configure for reverse proxy with /greek prefix
+    app.config['APPLICATION_ROOT'] = '/greek'
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
     @app.route('/')
     def index():
@@ -137,18 +142,25 @@ def create_app():
         user_id = session['user_id']
         mem = load_memory(user_id)
         level = mem.get('level')
-        # Load interests and vocab set summaries
+        # Load interests and due cards count
         interests = []
-        vocab_sets = []
+        due_count = 0
+        total_vocab = 0
         try:
             interests = http_get_json(f"{FASTAPI_URL}/interests/{user_id}")
         except Exception:
             interests = []
         try:
-            vocab_sets = http_get_json(f"{FASTAPI_URL}/vocab_sets/{user_id}")
+            due_cards = http_get_json(f"{FASTAPI_URL}/vocab/{user_id}/due", {"limit": 1000})
+            due_count = len(due_cards)
         except Exception:
-            vocab_sets = []
-        return render_template('dashboard.html', level=level, interests=interests, vocab_sets=vocab_sets)
+            due_count = 0
+        try:
+            all_vocab = http_get_json(f"{FASTAPI_URL}/vocab/{user_id}")
+            total_vocab = len(all_vocab)
+        except Exception:
+            total_vocab = 0
+        return render_template('dashboard.html', level=level, interests=interests, due_count=due_count, total_vocab=total_vocab)
 
     @app.route('/set_level', methods=['POST'])
     @login_required
@@ -398,93 +410,20 @@ def create_app():
     @login_required
     def start_quiz():
         user_id = session['user_id']
-        mode = request.form.get('q_mode', 'global')
-        count_str = request.form.get('q_count', '10')
-        book = request.form.get('q_book', '').strip() or None
-        chapter_str = request.form.get('q_chapter', '').strip()
-        chapter = int(chapter_str) if chapter_str.isdigit() else None
+        count_str = request.form.get('count', '20')
         try:
             agent = GreekTutorAgent(user_id=user_id)
-            res = agent.tool_start_quiz(mode=mode, count=int(count_str or 10), book=book, chapter=chapter)
+            # Always use 'due' mode for spaced repetition
+            res = agent.tool_start_quiz(mode='due', count=int(count_str or 20))
             if 'error' in res:
                 flash(f"Quiz not started: {res['error']}", 'error')
-                return redirect(url_for('interests'))
+                return redirect(url_for('dashboard'))
             flash(f"Quiz started with {res.get('total', 0)} questions.", 'success')
             return redirect(url_for('tutor'))
         except Exception as e:
             flash(f'Failed to start quiz: {e}', 'error')
             return redirect(url_for('dashboard'))
 
-    @app.post('/start_quiz_from_sets')
-    @login_required
-    def start_quiz_from_sets():
-        user_id = session['user_id']
-        set_ids = request.form.getlist('set_ids')
-        limit_str = request.form.get('limit', '20')
-        selected = [s for s in set_ids if s.isdigit()]
-        if not selected:
-            flash('Select at least one vocab set.', 'error')
-            return redirect(url_for('dashboard'))
-        try:
-            rows = http_get_json(f"{FASTAPI_URL}/vocab_set_items/{user_id}", {"set_ids": ','.join(selected)})
-            words = [r.get('vocab_word') for r in rows if r.get('vocab_word')]
-            if not words:
-                flash('No words found in selected sets.', 'error')
-                return redirect(url_for('dashboard'))
-            agent = GreekTutorAgent(user_id=user_id)
-            agent.tool_start_quiz_from_words(words, count=int(limit_str or 20))
-            flash(f"Quiz started from {len(selected)} set(s).", 'success')
-            return redirect(url_for('tutor'))
-        except Exception as e:
-            flash(f'Failed to start quiz: {e}', 'error')
-            return redirect(url_for('dashboard'))
-
-    @app.post('/delete_vocab_set')
-    @login_required
-    def delete_vocab_set():
-        user_id = session['user_id']
-        set_id = request.form.get('set_id', '').strip()
-        if not set_id.isdigit():
-            flash('Invalid set.', 'error')
-            return redirect(url_for('dashboard'))
-        try:
-            http_get_json(f"{FASTAPI_URL}/vocab_sets/{user_id}/{int(set_id)}")  # verify exists
-        except Exception:
-            pass
-        try:
-            req = urllib.request.Request(f"{FASTAPI_URL}/vocab_sets/{user_id}/{int(set_id)}", method='DELETE')
-            with urllib.request.urlopen(req):
-                pass
-            flash('Vocab set removed.', 'success')
-        except Exception as e:
-            flash(f'Failed to delete set: {e}', 'error')
-        return redirect(url_for('dashboard'))
-
-    @app.get('/vocab_set/<int:set_id>')
-    @login_required
-    def view_vocab_set(set_id: int):
-        user_id = session['user_id']
-        try:
-            rows = http_get_json(f"{FASTAPI_URL}/vocab_set_items/{user_id}", {"set_ids": str(set_id)})
-            words = [r.get('vocab_word') for r in rows if r.get('vocab_word')]
-        except Exception as e:
-            flash(f'Failed to load set: {e}', 'error')
-            return redirect(url_for('dashboard'))
-        # Get glosses via agent
-        glosses = {}
-        try:
-            agent = GreekTutorAgent(user_id=user_id)
-            glosses = agent.tool_gloss_tokens(words)
-        except Exception:
-            glosses = {}
-        # Build display rows
-        entries = []
-        for w in sorted(set(words)):
-            entries.append({
-                'word': w,
-                'glosses': ', '.join(glosses.get(w, [])[:5])
-            })
-        return render_template('vocab_set.html', set_id=set_id, entries=entries)
 
     @app.get('/usage')
     @login_required

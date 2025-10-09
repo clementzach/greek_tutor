@@ -43,6 +43,8 @@ Run
 - Start Flask (port 5000):
   - flask --app flask_app.app:app run --port 5000 --debug
 
+- Access at: http://localhost:5000 (local dev) or https://www.zacharyclement.com/greek (production)
+
 Local Scripts
  - One-shot dev runner (both services):
   - bash scripts/setup_and_run_dev.sh
@@ -65,22 +67,23 @@ Configuration
 
 Systemd Services
 - See services/README.md for full setup.
+- Service files are pre-configured for `/home/zacharyclement/greek_tutor` with user `zacharyclement`
 - Example steps:
-  - Create venv and install deps under your project directory (e.g., /opt/greek_tutor)
-  - Copy services/greek-tutor.env.example to /etc/default/greek-tutor and edit paths/secrets
+  - Ensure venv exists: `python3.13 -m venv .venv` and install deps
+  - Copy services/greek-tutor.env.example to /etc/default/greek-tutor and edit secrets
   - Copy unit files to /etc/systemd/system and enable:
     - sudo systemctl daemon-reload
     - sudo systemctl enable greek-tutor.target
     - sudo systemctl start greek-tutor.target
 
 Nginx Reverse Proxy
-- Example config at services/nginx/greek-tutor.conf
+- Config at services/nginx/greek-tutor.conf (configured for www.zacharyclement.com/greek)
 - Quick steps:
-  - sudo cp services/nginx/greek-tutor.conf /etc/nginx/sites-available/greek-tutor
-  - sudo ln -s /etc/nginx/sites-available/greek-tutor /etc/nginx/sites-enabled/greek-tutor
-  - Edit server_name, TLS cert paths, and static alias path
+  - Copy location blocks to your existing nginx server config for www.zacharyclement.com
+  - Or use as standalone server block (uncomment server sections in config)
+  - Update static file path if needed: /home/zacharyclement/greek_tutor/static/
   - sudo nginx -t && sudo systemctl reload nginx
-  - See services/nginx/README.md for details and TLS notes
+  - See services/nginx/README.md for details
 
 Auth Notes
 - Accounts stored in data/users.json

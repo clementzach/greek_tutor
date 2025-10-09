@@ -19,11 +19,17 @@ def init_vocab_db():
                vocab_word TEXT NOT NULL,
                times_reviewed INTEGER NOT NULL DEFAULT 0,
                mastery_score REAL NOT NULL DEFAULT 0.0,
-               last_reviewed TEXT
+               last_reviewed TEXT,
+               ease_factor REAL NOT NULL DEFAULT 2.5,
+               interval_days REAL NOT NULL DEFAULT 0,
+               next_review_date TEXT
            )'''
     )
     cur.execute(
         'CREATE UNIQUE INDEX IF NOT EXISTS idx_vocab_user_word ON vocabulary_progress(user_id, vocab_word)'
+    )
+    cur.execute(
+        'CREATE INDEX IF NOT EXISTS idx_vocab_next_review ON vocabulary_progress(user_id, next_review_date)'
     )
     conn.commit()
     conn.close()

@@ -4,14 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-# Edit these paths before installing:
-WorkingDirectory=/opt/greek_tutor
+WorkingDirectory=/home/zacharyclement/greek_tutor
 EnvironmentFile=/etc/default/greek-tutor
-ExecStart=/bin/bash -lc '"${VENV_DIR}/bin/uvicorn" fastapi_server.api:app --host ${API_HOST:-127.0.0.1} --port ${API_PORT:-8000} --workers ${API_WORKERS:-2}'
+ExecStart=/bin/bash -c '/home/zacharyclement/greek_tutor/.venv/bin/uvicorn fastapi_server.api:app --host $${API_HOST:-127.0.0.1} --port $${API_PORT:-8000} --workers $${API_WORKERS:-2}'
 Restart=on-failure
 RestartSec=3
-# Optionally set a runtime user:
-# User=greek
+User=zacharyclement
 
 [Install]
 WantedBy=multi-user.target

@@ -32,6 +32,9 @@ class VocabItem(BaseModel):
     times_reviewed: int = 0
     mastery_score: float = 0.0
     last_reviewed: Optional[str] = None
+    ease_factor: float = 2.5
+    interval_days: float = 0
+    next_review_date: Optional[str] = None
 
 
 class ConceptItem(BaseModel):
@@ -58,23 +61,47 @@ def get_vocab(user_id: str):
     return rows
 
 
+@app.get("/vocab/{user_id}/due")
+def get_due_vocab(user_id: str, limit: int = 20):
+    """Get vocabulary cards that are due for review using spaced repetition."""
+    now = datetime.utcnow().isoformat()
+    conn = get_conn(VOCAB_DB)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM vocabulary_progress
+        WHERE user_id = ? AND (next_review_date IS NULL OR next_review_date <= ?)
+        ORDER BY (next_review_date IS NULL) DESC, next_review_date ASC, id ASC
+        LIMIT ?
+        """,
+        (user_id, now, limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 @app.post("/vocab")
 def upsert_vocab(item: VocabItem):
     now = datetime.utcnow().isoformat()
     last = item.last_reviewed or now
+    next_review = item.next_review_date or now
     conn = get_conn(VOCAB_DB)
     cur = conn.cursor()
     # Upsert by (user_id, vocab_word)
     cur.execute(
         """
-        INSERT INTO vocabulary_progress (user_id, vocab_word, times_reviewed, mastery_score, last_reviewed)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO vocabulary_progress (user_id, vocab_word, times_reviewed, mastery_score, last_reviewed, ease_factor, interval_days, next_review_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, vocab_word)
         DO UPDATE SET times_reviewed=excluded.times_reviewed,
                       mastery_score=excluded.mastery_score,
-                      last_reviewed=excluded.last_reviewed
+                      last_reviewed=excluded.last_reviewed,
+                      ease_factor=excluded.ease_factor,
+                      interval_days=excluded.interval_days,
+                      next_review_date=excluded.next_review_date
         """,
-        (item.user_id, item.vocab_word, item.times_reviewed, item.mastery_score, last),
+        (item.user_id, item.vocab_word, item.times_reviewed, item.mastery_score, last, item.ease_factor, item.interval_days, next_review),
     )
     conn.commit()
     conn.close()
