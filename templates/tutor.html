@@ -112,6 +112,48 @@
   <button type="submit" id="chat-send-btn">Send</button>
 </form>
 <script>
+  // Auto-scroll to bottom of chat on page load
+  (function(){
+    function scrollToBottom(smooth) {
+      const chatDiv = document.querySelector('.chat');
+      if (chatDiv && chatDiv.children.length > 0) {
+        // Get the last message
+        const lastMessage = chatDiv.lastElementChild;
+        if (lastMessage) {
+          setTimeout(function() {
+            // Scroll to the bottom of the page
+            if (smooth) {
+              lastMessage.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            } else {
+              lastMessage.scrollIntoView({ behavior: 'auto', block: 'end' });
+            }
+            // Also ensure we're at the very bottom
+            setTimeout(function() {
+              window.scrollTo(0, document.body.scrollHeight);
+            }, 50);
+          }, 100);
+        }
+      }
+    }
+
+    // Check if we should scroll (after form submission)
+    const shouldScroll = sessionStorage.getItem('scrollToBottom');
+    if (shouldScroll === 'true') {
+      sessionStorage.removeItem('scrollToBottom');
+      scrollToBottom(false); // Instant scroll after submission
+    } else {
+      // Scroll on initial page load with smooth behavior
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() { scrollToBottom(true); });
+      } else {
+        scrollToBottom(true);
+      }
+    }
+
+    // Also scroll after images load (in case there are any in markdown)
+    window.addEventListener('load', function() { scrollToBottom(false); });
+  })();
+
   (function(){
     const form = document.getElementById('chat-form');
     const ta = document.getElementById('chat-message');
@@ -130,6 +172,9 @@
         sendBtn.textContent = 'Sending...';
         sendBtn.style.opacity = '0.6';
         sendBtn.style.cursor = 'not-allowed';
+
+        // Store scroll position intent before submit
+        sessionStorage.setItem('scrollToBottom', 'true');
       });
 
       ta.addEventListener('keydown', function(e){
@@ -220,34 +265,16 @@
     }
 
     cards.forEach(card => {
-      // Prevent double-firing on touch devices
-      let touchHandled = false;
+      // Track touch state to prevent double-firing
+      let touchStarted = false;
 
-      const handleAction = function(e) {
-        e.preventDefault();
-
-        if (touchHandled) {
-          touchHandled = false;
-          return;
-        }
-
-        // Find the card element (in case a child was clicked)
-        let cardElement = e.target;
-        while (cardElement && !cardElement.classList.contains('suggestion-card')) {
-          cardElement = cardElement.parentElement;
-        }
-
-        if (!cardElement) {
-          console.error('Could not find suggestion-card element');
-          return;
-        }
-
+      const handleAction = function(cardElement) {
         const action = cardElement.getAttribute('data-action');
         const concept = cardElement.getAttribute('data-concept');
         const verse = cardElement.getAttribute('data-verse');
         let message = '';
 
-        console.log('Card clicked:', action, 'concept:', concept, 'verse:', verse);
+        console.log('Card activated:', action, 'concept:', concept, 'verse:', verse);
 
         if (action === 'concepts' && concept) {
           message = `Can you teach me about ${concept}?`;
@@ -258,28 +285,63 @@
         }
 
         console.log('Message:', message);
-        console.log('chatInput:', chatInput, 'chatForm:', chatForm);
 
         if (message) {
           chatInput.value = message;
           console.log('Submitting form...');
-          if (chatForm.requestSubmit) {
-            chatForm.requestSubmit();
-          } else {
+          // Use setTimeout to ensure the form isn't blocked by isSubmitting
+          setTimeout(function() {
             chatForm.submit();
-          }
+          }, 10);
         }
       };
 
-      // Use touchend for mobile, click for desktop
+      // Handle touch events
+      card.addEventListener('touchstart', function(e) {
+        touchStarted = true;
+        console.log('Touch started');
+      }, { passive: true });
+
       card.addEventListener('touchend', function(e) {
-        touchHandled = true;
-        handleAction(e);
+        e.preventDefault(); // Prevent ghost clicks
+        e.stopPropagation();
+
+        if (!touchStarted) return;
+        touchStarted = false;
+
+        console.log('Touch ended');
+
+        // Find the card element (in case a child was touched)
+        let cardElement = e.target;
+        while (cardElement && !cardElement.classList.contains('suggestion-card')) {
+          cardElement = cardElement.parentElement;
+        }
+
+        if (cardElement) {
+          handleAction(cardElement);
+        }
       });
 
+      // Handle click events (for desktop/non-touch)
       card.addEventListener('click', function(e) {
-        if (!touchHandled) {
-          handleAction(e);
+        // Only handle clicks if not from a touch event
+        if (touchStarted) {
+          return;
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        console.log('Click event');
+
+        // Find the card element (in case a child was clicked)
+        let cardElement = e.target;
+        while (cardElement && !cardElement.classList.contains('suggestion-card')) {
+          cardElement = cardElement.parentElement;
+        }
+
+        if (cardElement) {
+          handleAction(cardElement);
         }
       });
     });

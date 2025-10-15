@@ -172,164 +172,195 @@ class GreekTutorAgent:
         })
         return "ok"
 
-    def tool_generate_concept_flashcards(self, concept_type: str, count: int = 20,
-                                        base_words: Optional[List[str]] = None) -> Dict[str, Any]:
+    def tool_generate_concept_flashcards(self, user_request: str, count: int = 20) -> Dict[str, Any]:
         """
-        Generate flashcards for grammatical concepts (cases, tenses, moods, parsing).
-        Uses LLM to generate realistic forms from common NT vocabulary.
+        Generate flashcards for grammatical concepts based on user's request.
+        Uses LLM to intelligently interpret the request and generate appropriate flashcards
+        based on user's learning level, mastered concepts, and interests.
 
-        concept_type: 'case', 'tense', 'mood', 'parsing', 'morphology'
+        user_request: what the user wants to practice (e.g., "aorist tense", "noun cases",
+                     "participles", "dative case for common words", etc.)
         count: number of flashcards to generate
-        base_words: optional list of lemmas to use; if not provided, uses common NT words
         """
-        # Default base words if not provided
-        if not base_words:
-            if concept_type == 'case':
-                base_words = ['λόγος', 'ἀγάπη', 'δόξα', 'θεός', 'ἄνθρωπος', 'καρδία', 'πνεῦμα', 'υἱός']
-            elif concept_type in ('tense', 'mood'):
-                base_words = ['λύω', 'ἀγαπάω', 'λέγω', 'πιστεύω', 'γράφω', 'βαπτίζω', 'ἔχω', 'γίνομαι']
-            elif concept_type == 'parsing':
-                base_words = ['λόγος', 'ἀγάπη', 'λύω', 'ἀγαπάω', 'θεός', 'υἱός']
-            else:
-                base_words = ['λόγος', 'λύω', 'ἀγάπη']
-
-        # Ask LLM to generate flashcards
-        prompt = self._build_concept_generation_prompt(concept_type, count, base_words)
-
-        r = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You are an expert in Koine Greek morphology and Biblical Greek pedagogy."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-        )
-
-        flashcards = []
         try:
-            result = json.loads(r.choices[0].message.content or "{}")
-            flashcards = result.get('flashcards', [])
-        except Exception as e:
-            return {"error": f"Failed to generate flashcards: {e}"}
+            logger.info(f"Generating {count} concept flashcards for user {self.user_id}: {user_request}")
 
-        if not flashcards:
-            return {"error": "No flashcards generated"}
-
-        # Insert flashcards into database
-        inserted = []
-        now = datetime.utcnow().isoformat()
-
-        for card in flashcards[:count]:
-            word = card.get('word', '')
-            answer = card.get('answer', '')
-            question_type = card.get('question_type', 'case')
-            metadata = json.dumps({
-                'lemma': card.get('lemma', ''),
-                'full_parsing': card.get('full_parsing', ''),
-                'hints': card.get('hints', [])
-            }, ensure_ascii=False)
-
-            if not word or not answer:
-                continue
+            # Gather user context for intelligent flashcard generation
+            mem = load_memory(self.user_id)
+            level = mem.get('level') or 'beginner'
 
             try:
-                http_post_json(f"{self.fastapi_url}/vocab", {
-                    "user_id": self.user_id,
-                    "vocab_word": word,
-                    "times_reviewed": 0,
-                    "mastery_score": 0.0,
-                    "concept_type": concept_type,
-                    "question_type": question_type,
-                    "metadata": metadata,
-                    "next_review_date": now,  # Make immediately available
-                })
-                inserted.append(word)
-            except Exception:
-                pass
+                # Get mastered concepts
+                concepts = http_get_json(f"{self.fastapi_url}/concepts/{self.user_id}")
+                mastered_concepts = [c.get('concept_name') for c in concepts]
 
-        return {
-            "inserted": inserted,
-            "count": len(inserted),
-            "concept_type": concept_type,
-            "question_type": flashcards[0].get('question_type') if flashcards else 'case'
-        }
+                # Get vocabulary stats
+                vocab_data = http_get_json(f"{self.fastapi_url}/vocab/{self.user_id}")
+                total_vocab = len(vocab_data)
 
-    def _build_concept_generation_prompt(self, concept_type: str, count: int, base_words: List[str]) -> str:
-        """Build LLM prompt for generating concept flashcards."""
-        if concept_type == 'case':
-            return f"""Generate {count} flashcards testing Greek noun cases.
-Use these lemmas: {', '.join(base_words)}
+                # Get user interests
+                interests = http_get_json(f"{self.fastapi_url}/interests/{self.user_id}")
 
-For each flashcard, provide:
-1. word: the declined form (e.g., "λόγου")
-2. answer: the case name (e.g., "genitive")
-3. lemma: the dictionary form
-4. full_parsing: complete info (e.g., "genitive singular masculine")
-5. question_type: "case"
+                # Get recent session summaries for context
+                sessions = mem.get('sessions', [])
+                recent_summaries = [s.get('summary') or s.get('title') for s in sessions[-3:]
+                                  if s.get('summary') or s.get('title')]
+            except Exception as e:
+                logger.warning(f"Failed to gather user context for flashcard generation: {e}")
+                mastered_concepts = []
+                total_vocab = 0
+                interests = []
+                recent_summaries = []
 
-Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "case"}}]}}
+            # Ask LLM to generate flashcards
+            prompt = self._build_concept_generation_prompt(user_request, count, level,
+                                                           mastered_concepts, interests,
+                                                           recent_summaries)
 
-Include all cases: nominative, genitive, dative, accusative, vocative (if applicable).
-Vary between singular and plural forms."""
+            logger.debug(f"Calling OpenAI to generate flashcards")
+            r = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are an expert in Koine Greek morphology and Biblical Greek pedagogy."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+            )
 
-        elif concept_type == 'tense':
-            return f"""Generate {count} flashcards testing Greek verb tenses.
-Use these verbs: {', '.join(base_words)}
+            flashcards = []
+            try:
+                result = json.loads(r.choices[0].message.content or "{}")
+                flashcards = result.get('flashcards', [])
+                logger.debug(f"LLM generated {len(flashcards)} flashcards")
+            except Exception as e:
+                logger.error(f"Failed to parse LLM response: {e}", exc_info=True)
+                return {"error": f"Failed to parse flashcard data: {e}"}
 
-For each flashcard, provide:
-1. word: the verb form (e.g., "ἔλυσα")
-2. answer: the tense (e.g., "aorist")
-3. lemma: the dictionary form
-4. full_parsing: complete info (e.g., "aorist active indicative 1st singular")
-5. question_type: "tense"
+            if not flashcards:
+                logger.warning("No flashcards generated by LLM")
+                return {"error": "No flashcards generated"}
 
-Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "tense"}}]}}
+            # Insert flashcards into database
+            inserted = []
+            now = datetime.utcnow().isoformat()
 
-Include: present, imperfect, future, aorist, perfect, pluperfect.
-Vary person/number. Use indicative mood for clarity."""
+            for card in flashcards[:count]:
+                word = card.get('word', '')
+                answer = card.get('answer', '')
+                question_type = card.get('question_type', 'concept')
+                concept_type = card.get('concept_type', 'grammar')
+                metadata = json.dumps({
+                    'lemma': card.get('lemma', ''),
+                    'full_parsing': card.get('full_parsing', ''),
+                    'hints': card.get('hints', []),
+                    'user_request': user_request,
+                }, ensure_ascii=False)
 
-        elif concept_type == 'mood':
-            return f"""Generate {count} flashcards testing Greek verb moods.
-Use these verbs: {', '.join(base_words)}
+                if not word or not answer:
+                    continue
 
-For each flashcard, provide:
-1. word: the verb form (e.g., "λύσῃ")
-2. answer: the mood (e.g., "subjunctive")
-3. lemma: the dictionary form
-4. full_parsing: complete info (e.g., "aorist active subjunctive 3rd singular")
-5. question_type: "mood"
+                try:
+                    http_post_json(f"{self.fastapi_url}/vocab", {
+                        "user_id": self.user_id,
+                        "vocab_word": word,
+                        "times_reviewed": 0,
+                        "mastery_score": 0.0,
+                        "concept_type": concept_type,
+                        "question_type": question_type,
+                        "metadata": metadata,
+                        "next_review_date": now,  # Make immediately available
+                    })
+                    inserted.append(word)
+                except Exception as e:
+                    logger.warning(f"Failed to insert flashcard '{word}': {e}")
 
-Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "mood"}}]}}
+            logger.info(f"Successfully inserted {len(inserted)} flashcards for user {self.user_id}")
+            return {
+                "inserted": inserted,
+                "count": len(inserted),
+                "user_request": user_request,
+                "question_types": list(set(c.get('question_type', 'concept') for c in flashcards[:count]))
+            }
 
-Include: indicative, subjunctive, optative, imperative, infinitive, participle."""
+        except Exception as e:
+            logger.error(f"Error in tool_generate_concept_flashcards: {e}", exc_info=True)
+            return {"error": f"Failed to generate flashcards: {str(e)}"}
 
-        elif concept_type == 'parsing':
-            return f"""Generate {count} flashcards for full morphological parsing.
-Use these words: {', '.join(base_words)}
+    def _build_concept_generation_prompt(self, user_request: str, count: int, level: str,
+                                          mastered_concepts: List[str], interests: List[Dict],
+                                          recent_summaries: List[str]) -> str:
+        """Build context-aware LLM prompt for generating concept flashcards."""
 
-For each flashcard, provide:
-1. word: the Greek form
-2. answer: abbreviated parsing (e.g., "GSM" for genitive singular masculine, or "AAI3S" for aorist active indicative 3rd singular)
-3. lemma: dictionary form
-4. full_parsing: human-readable (e.g., "genitive singular masculine" or "aorist active indicative 3rd singular")
-5. question_type: "parse"
+        # Build user context
+        context_parts = [f"Student Level: {level}"]
 
-Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "parse"}}]}}
+        if mastered_concepts:
+            context_parts.append(f"Mastered Concepts (first 15): {', '.join(mastered_concepts[:15])}")
 
-Mix nouns and verbs. For nouns: case, number, gender. For verbs: tense, voice, mood, person, number."""
+        if interests:
+            interest_desc = []
+            for interest in interests[:5]:
+                if interest.get('book'):
+                    interest_desc.append(f"{interest.get('book')} {interest.get('chapter', '')}")
+                elif interest.get('topic'):
+                    interest_desc.append(interest.get('topic'))
+            if interest_desc:
+                context_parts.append(f"Student Interests: {', '.join(interest_desc)}")
 
-        else:  # morphology or other
-            return f"""Generate {count} flashcards testing Greek morphology identification.
-Use these words: {', '.join(base_words)}
+        if recent_summaries:
+            context_parts.append(f"Recent Learning: {'; '.join(recent_summaries)}")
 
-For each flashcard, provide:
-1. word: the Greek form
-2. answer: what it is (e.g., "aorist participle", "dative plural")
-3. lemma: dictionary form
-4. full_parsing: complete description
-5. question_type: "identify"
+        context_block = "\n".join(context_parts)
 
-Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "identify"}}]}}"""
+        return f"""You are an expert Biblical Greek pedagogy advisor. A student wants to practice Greek grammar/morphology.
+
+STUDENT CONTEXT:
+{context_block}
+
+STUDENT REQUEST: "{user_request}"
+
+TASK: Generate {count} flashcards that intelligently match the student's request, taking into account:
+1. Their current level (adjust difficulty appropriately)
+2. What they've already mastered (build on it, don't repeat basics if they're advanced)
+3. Their interests (use relevant vocabulary when possible)
+4. The specific request (interpret flexibly - if they ask for "aorist", include aorist tense cards; if "dative case", focus on that)
+
+FLASHCARD FORMAT:
+Each flashcard must include:
+- word: The Greek form to be tested (e.g., "λόγου", "ἔλυσα", "λύσῃ")
+- answer: The expected answer (e.g., "genitive", "aorist", "subjunctive", "GSM", etc.)
+- lemma: The dictionary/lexicon form
+- full_parsing: Complete human-readable parsing (e.g., "genitive singular masculine", "aorist active indicative 1st singular")
+- question_type: The type of question - use one of these based on what makes sense:
+  * "case" - for noun case identification
+  * "tense" - for verb tense identification
+  * "mood" - for verb mood identification
+  * "voice" - for verb voice identification
+  * "parse" - for full morphological parsing (abbreviated like "GSM" or "AAI3S")
+  * "identify" - for general morphology identification
+  * "form" - for producing a specific form from a lemma
+- concept_type: Category of the flashcard - use one of: "noun", "verb", "participle", "adjective", "pronoun", "grammar"
+
+GUIDELINES:
+- Use common Biblical Greek vocabulary (NT words preferred)
+- Vary difficulty within appropriate range for student's level
+- If request is specific (e.g., "aorist participles"), focus on that
+- If request is broad (e.g., "grammar practice"), provide a good mix
+- Include helpful parsing information
+- Make forms authentic and pedagogically useful
+
+Return JSON only:
+{{"flashcards": [
+  {{
+    "word": "Greek form here",
+    "answer": "expected answer",
+    "lemma": "dictionary form",
+    "full_parsing": "complete parsing description",
+    "question_type": "case|tense|mood|voice|parse|identify|form",
+    "concept_type": "noun|verb|participle|adjective|pronoun|grammar"
+  }},
+  ...
+]}}"""
 
     # Quiz tools with spaced repetition
     def tool_start_quiz(self, mode: str = "due", count: int = 20,
@@ -1302,27 +1333,21 @@ Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", 
                 "type": "function",
                 "function": {
                     "name": "generate_concept_flashcards",
-                    "description": "Generate flashcards for advanced grammatical concepts (cases, tenses, moods, parsing, morphology). Use this when the user wants to practice Greek grammar beyond simple vocabulary meanings. Examples: 'test me on noun cases', 'quiz me on verb tenses', 'practice aorist forms'.",
+                    "description": "Generate flashcards for Greek grammatical concepts based on user's request. The system will intelligently interpret what the user wants to practice and generate appropriate flashcards based on their learning level, mastered concepts, and interests. Use this when the user wants to practice Greek grammar or morphology beyond simple vocabulary meanings. Examples: 'test me on noun cases', 'quiz me on verb tenses', 'practice aorist forms', 'I want to work on participles', 'generate dative case exercises', 'help me practice subjunctive mood'.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "concept_type": {
+                            "user_request": {
                                 "type": "string",
-                                "enum": ["case", "tense", "mood", "parsing", "morphology"],
-                                "description": "Type of grammatical concept: case (noun declensions), tense (verb tenses), mood (verb moods), parsing (full morphological analysis), morphology (general morphology)"
+                                "description": "What the user wants to practice, in natural language. Examples: 'aorist tense', 'noun cases', 'participles', 'dative case', 'subjunctive mood', 'parsing practice', 'verb conjugations', 'genitive forms', etc. Be specific about what the user asked for."
                             },
                             "count": {
                                 "type": "integer",
                                 "default": 20,
                                 "description": "Number of flashcards to generate"
-                            },
-                            "base_words": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Optional list of Greek lemmas to use as base words (e.g., ['λόγος', 'λύω']). If not provided, common NT words will be used."
                             }
                         },
-                        "required": ["concept_type"]
+                        "required": ["user_request"]
                     },
                 },
             },
@@ -1374,11 +1399,19 @@ Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", 
         if name == 'get_learning_suggestions':
             return json.dumps(self.tool_get_learning_suggestions())
         if name == 'generate_concept_flashcards':
-            return json.dumps(self.tool_generate_concept_flashcards(
-                arguments.get('concept_type', 'case'),
-                int(arguments.get('count', 20)),
-                arguments.get('base_words')
-            ))
+            try:
+                user_request = arguments.get('user_request')
+                if not user_request:
+                    return json.dumps({"error": "user_request parameter is required"})
+                count = arguments.get('count', 20)
+                if count is not None:
+                    count = int(count)
+                else:
+                    count = 20
+                return json.dumps(self.tool_generate_concept_flashcards(user_request, count))
+            except Exception as e:
+                logger.error(f"Error in generate_concept_flashcards: {e}", exc_info=True)
+                return json.dumps({"error": f"Failed to generate flashcards: {str(e)}"})
         return json.dumps({"error": f"unknown tool {name}"})
 
     def chat(self, user_text: str) -> str:

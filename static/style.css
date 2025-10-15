@@ -198,6 +198,8 @@ button:active, .button:active {
   overflow: hidden;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.6), 0 3px 12px rgba(0, 0, 0, 0.4);
   user-select: none;
+  -webkit-tap-highlight-color: rgba(108, 160, 255, 0.3);
+  touch-action: manipulation;
 }
 .suggestion-card::before {
   content: '';
