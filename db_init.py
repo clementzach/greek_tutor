@@ -98,6 +98,17 @@ def init_concepts_db():
                updated_at TEXT NOT NULL
            )'''
     )
+    # Track completed learning activities for progressive suggestions
+    cur.execute(
+        '''CREATE TABLE IF NOT EXISTS completed_activities (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               user_id TEXT NOT NULL,
+               activity_type TEXT NOT NULL,  -- concept|verse|quiz
+               activity_value TEXT NOT NULL,  -- specific concept name, verse reference, or quiz mode
+               completed_at TEXT NOT NULL
+           )'''
+    )
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_activities_user_type ON completed_activities(user_id, activity_type)')
     conn.commit()
     conn.close()
     print(f"Initialized {path}")

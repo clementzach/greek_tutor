@@ -1,32 +1,81 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Dashboard</h1>
-<div class="card">
-  <h3>Your Level</h3>
-  <form method="post" action="/set_level" class="inline">
-    <input type="text" name="level" placeholder="e.g., Beginner, A1, Intermediate" value="{{ level or '' }}">
-    <button type="submit">Save</button>
-  </form>
-</div>
-<div class="actions">
-  <a class="button" href="{{ url_for('tutor') }}">Start Tutoring</a>
+
+<!-- Prominent CTA at the top -->
+<div class="cta-section">
+  <a class="button button-primary button-large" href="{{ url_for('tutor') }}">
+    <span style="font-size: 1.2em;">📖</span> Start Tutoring Session
+  </a>
 </div>
 
-<div class="grid">
-  <div class="card">
-    <h3>Record Interest</h3>
-    <form method="post" action="/interests" id="interest-form">
-      <label>Type</label>
+<!-- Metrics Dashboard -->
+<div class="metrics-grid">
+  <div class="metric-card">
+    <div class="metric-value">{{ total_vocab }}</div>
+    <div class="metric-label">Vocabulary Words</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">{{ total_reviewed }}</div>
+    <div class="metric-label">Cards Reviewed</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">{{ due_count }}</div>
+    <div class="metric-label">Due for Review</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">{{ mastered_count }}</div>
+    <div class="metric-label">Concepts Mastered</div>
+  </div>
+</div>
+
+<!-- Level Setting -->
+<div class="card">
+  <h3>Your Learning Level</h3>
+  <form method="post" action="{{ url_for('set_level') }}" class="inline-form">
+    <input type="text" name="level" placeholder="e.g., Beginner, A1, Intermediate" value="{{ level or '' }}" style="max-width: 300px;">
+    <button type="submit">Update Level</button>
+  </form>
+</div>
+
+<!-- Quick Review Section -->
+{% if due_count > 0 %}
+<div class="card card-highlight">
+  <h3>📚 Ready to Review</h3>
+  <p>You have <strong>{{ due_count }} cards</strong> due for review using spaced repetition.</p>
+  <form method="post" action="{{ url_for('start_quiz') }}" class="inline-form">
+    <label>Review</label>
+    <input type="number" name="count" min="1" max="200" value="{{ default_quiz_count }}" style="width:6rem;">
+    <span>cards</span>
+    <button type="submit" class="button-primary">Start Review Quiz</button>
+  </form>
+</div>
+{% endif %}
+
+<!-- Tabbed Interface for Interests & Vocab -->
+<div class="card">
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="interests">Record Interest & Generate Vocab</button>
+    <button class="tab-btn" data-tab="history">Interest History</button>
+  </div>
+
+  <div class="tab-content active" id="interests-tab">
+    <h3>Record Your Learning Interests</h3>
+    <p class="muted">Track what you want to learn. Optionally generate vocabulary from your interests to study with flashcards.</p>
+
+    <form method="post" action="{{ url_for('interests') }}" id="interest-form">
+      <label>What interests you?</label>
       <div class="radio-row" id="interest-type-row">
         <label><input type="radio" name="interest_type" value="topic" checked> Topic</label>
         <label><input type="radio" name="interest_type" value="book"> Book</label>
         <label><input type="radio" name="interest_type" value="chapter"> Chapter</label>
         <label><input type="radio" name="interest_type" value="passage"> Passage</label>
       </div>
+
       <div class="row">
         <div class="col">
           <label>Topic</label>
-          <input type="text" name="topic" id="i_topic" placeholder="e.g., Aorist tense, Faith">
+          <input type="text" name="topic" id="i_topic" placeholder="e.g., Aorist tense, Faith, Prayer">
         </div>
         <div class="col">
           <label>Book</label>
@@ -41,85 +90,87 @@
           <input type="text" name="passage_ref" id="i_passage_ref" placeholder="e.g., 16-18">
         </div>
       </div>
-      <button type="submit">Save Interest</button>
-    </form>
-  </div>
 
-  <div class="card">
-    <h3>Generate Vocabulary</h3>
-    <form method="post" action="/generate_vocab" id="generate-form" class="inline-form">
-      <div class="row">
-        <div class="col">
-          <label>Mode</label>
-          <select name="mode" id="mode-select">
-            <option value="global">Global (NT)</option>
-            <option value="book">By Book</option>
-            <option value="chapter">By Chapter</option>
-          </select>
-        </div>
-        <div class="col">
-          <label>Count</label>
-          <input type="number" name="count" min="1" max="200" value="20">
-        </div>
-        <div class="col" id="gv-book-wrap">
-          <label>Book</label>
-          <select name="g_book" id="g_book"></select>
-        </div>
-        <div class="col" id="gv-chap-wrap">
-          <label>Chapter</label>
-          <select name="g_chapter" id="g_chapter"></select>
+      <!-- Vocabulary Generation Options (integrated) -->
+      <div class="vocab-gen-section">
+        <label class="checkbox">
+          <input type="checkbox" name="generate_vocab" id="generate_vocab_check" checked>
+          <strong>Generate vocabulary from this interest</strong>
+        </label>
+
+        <div id="vocab-options" class="vocab-options">
+          <div class="row">
+            <div class="col">
+              <label>Count</label>
+              <input type="number" name="count" min="1" max="200" value="20" style="width: 100px;">
+            </div>
+            <div class="col">
+              <label class="checkbox">
+                <input type="checkbox" name="normalize" checked>
+                Normalize (lowercase, strip diacritics)
+              </label>
+            </div>
+          </div>
         </div>
       </div>
-      <label class="checkbox"><input type="checkbox" name="normalize" checked> Normalize (lowercase, strip diacritics)</label>
-      <button type="submit">Generate & Insert</button>
+
+      <button type="submit" class="button-primary">Save Interest</button>
     </form>
   </div>
 
-  
-</div>
-
-<div class="card">
-  <h3>Vocabulary Review</h3>
-  <div style="margin-bottom: 1rem;">
-    <p><strong>Total Vocabulary:</strong> {{ total_vocab }} words</p>
-    <p><strong>Due for Review:</strong> {{ due_count }} cards</p>
-  </div>
-
-  {% if due_count > 0 %}
-  <form method="post" action="/start_quiz" style="display:flex; gap:.5rem; align-items:center;">
-    <label>Review</label>
-    <input type="number" name="count" min="1" max="200" value="{{ min(due_count, 20) }}" style="width:6rem;">
-    <span>cards</span>
-    <button type="submit">Start Review</button>
-  </form>
-  {% else %}
-  <p class="muted">No cards due for review. Generate vocabulary below to get started!</p>
-  {% endif %}
-  <div class="table-wrap" style="margin-top:1rem;">
-    <table>
-      <thead>
-        <tr><th colspan="6" style="text-align:left">Your Interests</th></tr>
-        <tr><th>When</th><th>Type</th><th>Topic</th><th>Book</th><th>Chapter</th><th>Passage</th></tr>
-      </thead>
-      <tbody>
-        {% for it in interests %}
-        <tr>
-          <td>{{ it.created_at or '' }}</td>
-          <td>{{ it.interest_type }}</td>
-          <td>{{ it.topic or '' }}</td>
-          <td>{{ it.book or '' }}</td>
-          <td>{{ it.chapter or '' }}</td>
-          <td>{{ it.passage_ref or '' }}</td>
-        </tr>
-        {% else %}
-        <tr><td colspan="6" class="muted">No interests yet.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  <div class="tab-content" id="history-tab">
+    <h3>Your Learning Interests</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Type</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for it in interests %}
+          <tr>
+            <td>{{ it.created_at[:10] if it.created_at else '' }}</td>
+            <td><span class="badge">{{ it.interest_type }}</span></td>
+            <td>
+              {% if it.topic %}{{ it.topic }}{% endif %}
+              {% if it.book %}{{ it.book }}{% endif %}
+              {% if it.chapter %} {{ it.chapter }}{% endif %}
+              {% if it.passage_ref %} ({{ it.passage_ref }}){% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="muted">No interests recorded yet. Add one above!</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 
 <script>
+  // Tab switching
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  const tabContents = document.querySelectorAll('.tab-content');
+  tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetTab = btn.dataset.tab;
+      tabBtns.forEach(b => b.classList.remove('active'));
+      tabContents.forEach(c => c.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(targetTab + '-tab').classList.add('active');
+    });
+  });
+
+  // Show/hide vocab options based on checkbox
+  const genVocabCheck = document.getElementById('generate_vocab_check');
+  const vocabOptions = document.getElementById('vocab-options');
+  genVocabCheck.addEventListener('change', () => {
+    vocabOptions.style.display = genVocabCheck.checked ? 'block' : 'none';
+  });
+
   // Shared NT book list and helpers
   const NT = [
     ['Matthew',28],['Mark',16],['Luke',24],['John',21],['Acts',28],['Romans',16],
@@ -129,16 +180,35 @@
     ['James',5],['1 Peter',5],['2 Peter',3],['1 John',5],['2 John',1],['3 John',1],
     ['Jude',1],['Revelation',22]
   ];
+
   function populateBooks(selectEl) {
     selectEl.innerHTML = '';
-    const opt = document.createElement('option'); opt.value = ''; opt.textContent = '— Select —'; selectEl.appendChild(opt);
-    for (const [name] of NT) { const o = document.createElement('option'); o.value = name; o.textContent = name; selectEl.appendChild(o); }
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '— Select —';
+    selectEl.appendChild(opt);
+    for (const [name] of NT) {
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = name;
+      selectEl.appendChild(o);
+    }
   }
+
   function populateChapters(selectEl, book) {
     selectEl.innerHTML = '';
-    const opt = document.createElement('option'); opt.value=''; opt.textContent='—'; selectEl.appendChild(opt);
-    const entry = NT.find(x => x[0] === book); const max = entry ? entry[1] : 0;
-    for (let i=1; i<=max; i++) { const o=document.createElement('option'); o.value=String(i); o.textContent=String(i); selectEl.appendChild(o); }
+    const opt = document.createElement('option');
+    opt.value='';
+    opt.textContent='—';
+    selectEl.appendChild(opt);
+    const entry = NT.find(x => x[0] === book);
+    const max = entry ? entry[1] : 0;
+    for (let i=1; i<=max; i++) {
+      const o=document.createElement('option');
+      o.value=String(i);
+      o.textContent=String(i);
+      selectEl.appendChild(o);
+    }
   }
 
   // Interest form setup
@@ -147,9 +217,11 @@
   const iBook = document.getElementById('i_book');
   const iChap = document.getElementById('i_chapter');
   const iPass = document.getElementById('i_passage_ref');
+
   populateBooks(iBook);
   iBook.addEventListener('change', () => populateChapters(iChap, iBook.value));
   populateChapters(iChap, iBook.value);
+
   function syncInterestFields() {
     const type = document.querySelector('input[name="interest_type"]:checked').value;
     iTopic.disabled = type !== 'topic';
@@ -157,31 +229,198 @@
     iChap.disabled = !(type === 'chapter' || type === 'passage');
     iPass.disabled = type !== 'passage';
   }
-  iTypeRow.addEventListener('change', syncInterestFields); syncInterestFields();
 
-  // Generate vocab form setup
-  const mode = document.getElementById('mode-select');
-  const gBook = document.getElementById('g_book');
-  const gChap = document.getElementById('g_chapter');
-  const gvBookWrap = document.getElementById('gv-book-wrap');
-  const gvChapWrap = document.getElementById('gv-chap-wrap');
-  function clearSelect(sel) { sel.innerHTML = ''; }
-  function ensureBooksPopulated() { if (!gBook.options || gBook.options.length === 0) populateBooks(gBook); }
-  function ensureChaptersPopulated() { if (!gChap.options || gChap.options.length <= 1) populateChapters(gChap, gBook.value); }
-  gBook.addEventListener('change', () => populateChapters(gChap, gBook.value));
-  function syncGenFields() {
-    const m = mode.value;
-    if (m === 'global') {
-      gvBookWrap.classList.add('hidden'); gvChapWrap.classList.add('hidden');
-      gBook.disabled = true; gChap.disabled = true; gBook.value=''; clearSelect(gBook); clearSelect(gChap);
-    } else if (m === 'book') {
-      gvBookWrap.classList.remove('hidden'); gvChapWrap.classList.add('hidden');
-      gBook.disabled = false; gChap.disabled = true; gChap.value=''; clearSelect(gChap); ensureBooksPopulated();
-    } else {
-      gvBookWrap.classList.remove('hidden'); gvChapWrap.classList.remove('hidden');
-      gBook.disabled = false; gChap.disabled = false; ensureBooksPopulated(); ensureChaptersPopulated();
-    }
-  }
-  mode.addEventListener('change', syncGenFields); syncGenFields();
+  iTypeRow.addEventListener('change', syncInterestFields);
+  syncInterestFields();
 </script>
+
+<style>
+.cta-section {
+  text-align: center;
+  margin: 2rem 0;
+  padding: 2rem;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 12px;
+}
+
+.button-large {
+  padding: 1rem 2rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.button-primary {
+  background: #667eea;
+  color: white;
+  border: none;
+}
+
+.button-primary:hover {
+  background: #5568d3;
+  transform: translateY(-1px);
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.metric-card {
+  background: var(--card);
+  border: 1px solid #3a3a50;
+  border-radius: 8px;
+  padding: 1.5rem;
+  text-align: center;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+}
+
+.metric-value {
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: #667eea;
+  margin-bottom: 0.5rem;
+}
+
+.metric-label {
+  font-size: 0.9rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.card-highlight {
+  border-left: 4px solid #667eea;
+  background: linear-gradient(135deg, #1e1e2a 0%, #242435 100%);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+}
+
+.tabs {
+  display: flex;
+  border-bottom: 2px solid #3a3a50;
+  margin-bottom: 1.5rem;
+  gap: 0.5rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.tab-btn {
+  padding: 0.75rem 1.5rem;
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  cursor: pointer;
+  font-weight: 500;
+  color: #999;
+  transition: all 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tab-btn:hover {
+  color: #ccc;
+  background: #1a1a20;
+}
+
+.tab-btn.active {
+  color: #667eea;
+  border-bottom-color: #667eea;
+  font-weight: 600;
+}
+
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+.vocab-gen-section {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: #0f0f15;
+  border-radius: 6px;
+  border-left: 3px solid #667eea;
+}
+
+.vocab-options {
+  margin-top: 1rem;
+  padding-left: 1.5rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  background: #e0e7ff;
+  color: #667eea;
+  border-radius: 12px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.inline-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.muted {
+  color: #999;
+  font-size: 0.95rem;
+}
+
+/* Mobile-specific dashboard styles */
+@media (max-width: 768px) {
+  .cta-section {
+    padding: 1.5rem 1rem;
+    margin: 1rem 0;
+  }
+
+  .button-large {
+    padding: 0.875rem 1.5rem;
+    font-size: 1rem;
+    width: 100%;
+  }
+
+  .metrics-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem;
+    margin: 1rem 0;
+  }
+
+  .metric-card {
+    padding: 1rem;
+  }
+
+  .metric-value {
+    font-size: 2rem;
+  }
+
+  .metric-label {
+    font-size: 0.8rem;
+  }
+
+  .tab-btn {
+    padding: 0.6rem 1rem;
+    font-size: 0.9rem;
+  }
+
+  .vocab-options {
+    padding-left: 0.5rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .metric-value {
+    font-size: 1.75rem;
+  }
+}
+</style>
 {% endblock %}

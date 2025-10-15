@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 import sqlite3
 import os
+import sys
 from datetime import datetime
 from typing import List, Optional
 import json
@@ -10,7 +11,23 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 VOCAB_DB = os.path.join(DATA_DIR, 'vocab.db')
 CONCEPTS_DB = os.path.join(DATA_DIR, 'concepts.db')
 
+# Add parent directory to path for config import
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+from config.logging_config import get_fastapi_logger, log_error
+
+# Initialize logger
+logger = get_fastapi_logger()
+
 app = FastAPI(title="Greek Tutor DB API")
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("FastAPI service starting...")
+    logger.info(f"Vocab DB: {VOCAB_DB}")
+    logger.info(f"Concepts DB: {CONCEPTS_DB}")
 
 
 def dict_factory(cursor, row):
@@ -35,6 +52,9 @@ class VocabItem(BaseModel):
     ease_factor: float = 2.5
     interval_days: float = 0
     next_review_date: Optional[str] = None
+    concept_type: str = 'word'  # word|case|tense|mood|parsing|morphology
+    question_type: str = 'meaning'  # meaning|case|tense|mood|parse|identify
+    metadata: Optional[str] = None  # JSON string for additional context
 
 
 class ConceptItem(BaseModel):
@@ -50,62 +70,95 @@ def health():
 
 @app.get("/vocab/{user_id}")
 def get_vocab(user_id: str):
-    conn = get_conn(VOCAB_DB)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM vocabulary_progress WHERE user_id = ? ORDER BY (last_reviewed IS NULL) ASC, last_reviewed DESC, id DESC",
-        (user_id,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+    logger.debug(f"Fetching vocabulary for user: {user_id}")
+    try:
+        conn = get_conn(VOCAB_DB)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM vocabulary_progress WHERE user_id = ? ORDER BY (last_reviewed IS NULL) ASC, last_reviewed DESC, id DESC",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        logger.debug(f"Retrieved {len(rows)} vocabulary items for user {user_id}")
+        return rows
+    except Exception as e:
+        log_error(logger, e, f"Failed to fetch vocabulary for user {user_id}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/vocab/{user_id}/due")
-def get_due_vocab(user_id: str, limit: int = 20):
+def get_due_vocab(user_id: str, limit: int = 20, concept_type: Optional[str] = None):
     """Get vocabulary cards that are due for review using spaced repetition."""
-    now = datetime.utcnow().isoformat()
-    conn = get_conn(VOCAB_DB)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT * FROM vocabulary_progress
-        WHERE user_id = ? AND (next_review_date IS NULL OR next_review_date <= ?)
-        ORDER BY (next_review_date IS NULL) DESC, next_review_date ASC, id ASC
-        LIMIT ?
-        """,
-        (user_id, now, limit),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+    logger.debug(f"Fetching due vocabulary for user {user_id}, limit={limit}, concept_type={concept_type}")
+    try:
+        now = datetime.utcnow().isoformat()
+        conn = get_conn(VOCAB_DB)
+        cur = conn.cursor()
+
+        if concept_type:
+            cur.execute(
+                """
+                SELECT * FROM vocabulary_progress
+                WHERE user_id = ? AND (next_review_date IS NULL OR next_review_date <= ?) AND concept_type = ?
+                ORDER BY (next_review_date IS NULL) DESC, next_review_date ASC, id ASC
+                LIMIT ?
+                """,
+                (user_id, now, concept_type, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT * FROM vocabulary_progress
+                WHERE user_id = ? AND (next_review_date IS NULL OR next_review_date <= ?)
+                ORDER BY (next_review_date IS NULL) DESC, next_review_date ASC, id ASC
+                LIMIT ?
+                """,
+                (user_id, now, limit),
+            )
+        rows = cur.fetchall()
+        conn.close()
+        logger.info(f"Retrieved {len(rows)} due cards for user {user_id}")
+        return rows
+    except Exception as e:
+        log_error(logger, e, f"Failed to fetch due vocabulary for user {user_id}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/vocab")
 def upsert_vocab(item: VocabItem):
-    now = datetime.utcnow().isoformat()
-    last = item.last_reviewed or now
-    next_review = item.next_review_date or now
-    conn = get_conn(VOCAB_DB)
-    cur = conn.cursor()
-    # Upsert by (user_id, vocab_word)
-    cur.execute(
-        """
-        INSERT INTO vocabulary_progress (user_id, vocab_word, times_reviewed, mastery_score, last_reviewed, ease_factor, interval_days, next_review_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id, vocab_word)
-        DO UPDATE SET times_reviewed=excluded.times_reviewed,
-                      mastery_score=excluded.mastery_score,
-                      last_reviewed=excluded.last_reviewed,
-                      ease_factor=excluded.ease_factor,
-                      interval_days=excluded.interval_days,
-                      next_review_date=excluded.next_review_date
-        """,
-        (item.user_id, item.vocab_word, item.times_reviewed, item.mastery_score, last, item.ease_factor, item.interval_days, next_review),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "ok"}
+    logger.debug(f"Upserting vocabulary '{item.vocab_word}' for user {item.user_id}")
+    try:
+        now = datetime.utcnow().isoformat()
+        last = item.last_reviewed or now
+        next_review = item.next_review_date or now
+        conn = get_conn(VOCAB_DB)
+        cur = conn.cursor()
+        # Upsert by (user_id, vocab_word)
+        cur.execute(
+            """
+            INSERT INTO vocabulary_progress (user_id, vocab_word, times_reviewed, mastery_score, last_reviewed, ease_factor, interval_days, next_review_date, concept_type, question_type, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, vocab_word)
+            DO UPDATE SET times_reviewed=excluded.times_reviewed,
+                          mastery_score=excluded.mastery_score,
+                          last_reviewed=excluded.last_reviewed,
+                          ease_factor=excluded.ease_factor,
+                          interval_days=excluded.interval_days,
+                          next_review_date=excluded.next_review_date,
+                          concept_type=excluded.concept_type,
+                          question_type=excluded.question_type,
+                          metadata=excluded.metadata
+            """,
+            (item.user_id, item.vocab_word, item.times_reviewed, item.mastery_score, last, item.ease_factor, item.interval_days, next_review, item.concept_type, item.question_type, item.metadata),
+        )
+        conn.commit()
+        conn.close()
+        logger.debug(f"Successfully upserted vocabulary '{item.vocab_word}' for user {item.user_id}")
+        return {"status": "ok"}
+    except Exception as e:
+        log_error(logger, e, f"Failed to upsert vocabulary for user {item.user_id}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class ReviewUpdate(BaseModel):
@@ -154,16 +207,21 @@ def get_concepts(user_id: str):
 
 @app.post("/concepts")
 def add_concept(item: ConceptItem):
-    when = item.mastered_at or datetime.utcnow().isoformat()
-    conn = get_conn(CONCEPTS_DB)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO concepts_mastery(user_id, concept_name, mastered_at) VALUES (?, ?, ?)",
-        (item.user_id, item.concept_name, when),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "ok"}
+    logger.info(f"Recording mastered concept '{item.concept_name}' for user {item.user_id}")
+    try:
+        when = item.mastered_at or datetime.utcnow().isoformat()
+        conn = get_conn(CONCEPTS_DB)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO concepts_mastery(user_id, concept_name, mastered_at) VALUES (?, ?, ?)",
+            (item.user_id, item.concept_name, when),
+        )
+        conn.commit()
+        conn.close()
+        return {"status": "ok"}
+    except Exception as e:
+        log_error(logger, e, f"Failed to add concept for user {item.user_id}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/relevant_vocab")
@@ -393,3 +451,49 @@ def upsert_glosses(batch: GlossBatch):
     conn.commit()
     conn.close()
     return {"status": "ok", "upserted": count}
+
+
+# Completed activities endpoints for progressive suggestions
+class CompletedActivity(BaseModel):
+    user_id: str
+    activity_type: str  # concept|verse|quiz
+    activity_value: str  # specific concept name, verse reference, or quiz mode
+    completed_at: Optional[str] = None
+
+
+@app.post("/activities")
+def log_activity(item: CompletedActivity):
+    """Log a completed learning activity for progressive suggestions."""
+    when = item.completed_at or datetime.utcnow().isoformat()
+    conn = get_conn(CONCEPTS_DB)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO completed_activities(user_id, activity_type, activity_value, completed_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (item.user_id, item.activity_type, item.activity_value, when),
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+
+@app.get("/activities/{user_id}")
+def get_activities(user_id: str, activity_type: Optional[str] = None, limit: int = 100):
+    """Get completed activities for a user, optionally filtered by type."""
+    conn = get_conn(CONCEPTS_DB)
+    cur = conn.cursor()
+    if activity_type:
+        cur.execute(
+            "SELECT * FROM completed_activities WHERE user_id=? AND activity_type=? ORDER BY completed_at DESC LIMIT ?",
+            (user_id, activity_type, limit),
+        )
+    else:
+        cur.execute(
+            "SELECT * FROM completed_activities WHERE user_id=? ORDER BY completed_at DESC LIMIT ?",
+            (user_id, limit),
+        )
+    rows = cur.fetchall()
+    conn.close()
+    return rows

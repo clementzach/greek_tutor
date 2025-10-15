@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import re
 from datetime import datetime
@@ -13,8 +14,17 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 MEMORY_DIR = os.path.join(DATA_DIR, 'memory')
 os.makedirs(MEMORY_DIR, exist_ok=True)
 
+# Add parent directory to path for config import
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 from .bible import load_gnt, load_kjv, get_verses, parse_ref, canonical_book, frequency_gnt, load_gnt_samples_as_full, strip_diacritics
 from .spaced_repetition import calculate_next_review, quality_from_verdict, mastery_from_ease_and_interval
+from config.logging_config import get_agent_logger, log_error
+
+# Initialize logger
+logger = get_agent_logger()
 
 def load_memory(user_id: str) -> Dict[str, Any]:
     path = os.path.join(MEMORY_DIR, f"{user_id}.json")
@@ -55,6 +65,7 @@ class GreekTutorAgent:
         self.fastapi_url = fastapi_url or os.environ.get('FASTAPI_URL', 'http://localhost:8000')
         self.memory = load_memory(user_id)
         self._last_user_text: str = ""
+        logger.debug(f"GreekTutorAgent initialized for user {user_id} with model {model}")
         # one-time migration from single-chat to sessions
         if self.memory.get('sessions') is None:
             self.memory['sessions'] = []
@@ -75,23 +86,46 @@ class GreekTutorAgent:
                 self.memory['chat'] = []
                 save_memory(self.user_id, self.memory)
 
+    # Helper method to log completed activities
+    def _log_activity(self, activity_type: str, activity_value: str):
+        """Log a completed learning activity for progressive suggestions."""
+        try:
+            payload = {
+                "user_id": self.user_id,
+                "activity_type": activity_type,
+                "activity_value": activity_value,
+                "completed_at": datetime.utcnow().isoformat()
+            }
+            http_post_json(f"{self.fastapi_url}/activities", payload)
+            logger.debug(f"Logged activity for user {self.user_id}: {activity_type}={activity_value}")
+        except Exception as e:
+            # Don't fail the user experience if logging fails
+            log_error(logger, e, f"Failed to log activity for user {self.user_id}")
+
     # Tool implementations
     def tool_explain_concept(self, concept: str, level: Optional[str] = None) -> str:
+        logger.info(f"Explaining concept '{concept}' for user {self.user_id}")
         prompt = (
             "You are a concise Biblical Greek tutor. Explain the concept clearly, "
             "step-by-step, with 1-2 simple examples. Use Koine Greek terminology when useful.\n"
             f"Concept: {concept}\n"
             f"Student level: {level or self.memory.get('level') or 'unknown'}\n"
         )
-        r = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You explain Koine Greek concepts succinctly for learners."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.5,
-        )
-        return r.choices[0].message.content or ""
+        try:
+            r = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You explain Koine Greek concepts succinctly for learners."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.5,
+            )
+            # Log that this concept has been explained/learned
+            self._log_activity("concept", concept)
+            return r.choices[0].message.content or ""
+        except Exception as e:
+            log_error(logger, e, f"Failed to explain concept '{concept}' for user {self.user_id}")
+            return f"Error explaining concept: {str(e)}"
 
     def tool_provide_gnt_examples(self, query: str) -> List[Dict[str, str]]:
         path = os.path.join(DATA_DIR, 'gnt_samples.json')
@@ -138,11 +172,171 @@ class GreekTutorAgent:
         })
         return "ok"
 
+    def tool_generate_concept_flashcards(self, concept_type: str, count: int = 20,
+                                        base_words: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Generate flashcards for grammatical concepts (cases, tenses, moods, parsing).
+        Uses LLM to generate realistic forms from common NT vocabulary.
+
+        concept_type: 'case', 'tense', 'mood', 'parsing', 'morphology'
+        count: number of flashcards to generate
+        base_words: optional list of lemmas to use; if not provided, uses common NT words
+        """
+        # Default base words if not provided
+        if not base_words:
+            if concept_type == 'case':
+                base_words = ['λόγος', 'ἀγάπη', 'δόξα', 'θεός', 'ἄνθρωπος', 'καρδία', 'πνεῦμα', 'υἱός']
+            elif concept_type in ('tense', 'mood'):
+                base_words = ['λύω', 'ἀγαπάω', 'λέγω', 'πιστεύω', 'γράφω', 'βαπτίζω', 'ἔχω', 'γίνομαι']
+            elif concept_type == 'parsing':
+                base_words = ['λόγος', 'ἀγάπη', 'λύω', 'ἀγαπάω', 'θεός', 'υἱός']
+            else:
+                base_words = ['λόγος', 'λύω', 'ἀγάπη']
+
+        # Ask LLM to generate flashcards
+        prompt = self._build_concept_generation_prompt(concept_type, count, base_words)
+
+        r = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": "You are an expert in Koine Greek morphology and Biblical Greek pedagogy."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+
+        flashcards = []
+        try:
+            result = json.loads(r.choices[0].message.content or "{}")
+            flashcards = result.get('flashcards', [])
+        except Exception as e:
+            return {"error": f"Failed to generate flashcards: {e}"}
+
+        if not flashcards:
+            return {"error": "No flashcards generated"}
+
+        # Insert flashcards into database
+        inserted = []
+        now = datetime.utcnow().isoformat()
+
+        for card in flashcards[:count]:
+            word = card.get('word', '')
+            answer = card.get('answer', '')
+            question_type = card.get('question_type', 'case')
+            metadata = json.dumps({
+                'lemma': card.get('lemma', ''),
+                'full_parsing': card.get('full_parsing', ''),
+                'hints': card.get('hints', [])
+            }, ensure_ascii=False)
+
+            if not word or not answer:
+                continue
+
+            try:
+                http_post_json(f"{self.fastapi_url}/vocab", {
+                    "user_id": self.user_id,
+                    "vocab_word": word,
+                    "times_reviewed": 0,
+                    "mastery_score": 0.0,
+                    "concept_type": concept_type,
+                    "question_type": question_type,
+                    "metadata": metadata,
+                    "next_review_date": now,  # Make immediately available
+                })
+                inserted.append(word)
+            except Exception:
+                pass
+
+        return {
+            "inserted": inserted,
+            "count": len(inserted),
+            "concept_type": concept_type,
+            "question_type": flashcards[0].get('question_type') if flashcards else 'case'
+        }
+
+    def _build_concept_generation_prompt(self, concept_type: str, count: int, base_words: List[str]) -> str:
+        """Build LLM prompt for generating concept flashcards."""
+        if concept_type == 'case':
+            return f"""Generate {count} flashcards testing Greek noun cases.
+Use these lemmas: {', '.join(base_words)}
+
+For each flashcard, provide:
+1. word: the declined form (e.g., "λόγου")
+2. answer: the case name (e.g., "genitive")
+3. lemma: the dictionary form
+4. full_parsing: complete info (e.g., "genitive singular masculine")
+5. question_type: "case"
+
+Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "case"}}]}}
+
+Include all cases: nominative, genitive, dative, accusative, vocative (if applicable).
+Vary between singular and plural forms."""
+
+        elif concept_type == 'tense':
+            return f"""Generate {count} flashcards testing Greek verb tenses.
+Use these verbs: {', '.join(base_words)}
+
+For each flashcard, provide:
+1. word: the verb form (e.g., "ἔλυσα")
+2. answer: the tense (e.g., "aorist")
+3. lemma: the dictionary form
+4. full_parsing: complete info (e.g., "aorist active indicative 1st singular")
+5. question_type: "tense"
+
+Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "tense"}}]}}
+
+Include: present, imperfect, future, aorist, perfect, pluperfect.
+Vary person/number. Use indicative mood for clarity."""
+
+        elif concept_type == 'mood':
+            return f"""Generate {count} flashcards testing Greek verb moods.
+Use these verbs: {', '.join(base_words)}
+
+For each flashcard, provide:
+1. word: the verb form (e.g., "λύσῃ")
+2. answer: the mood (e.g., "subjunctive")
+3. lemma: the dictionary form
+4. full_parsing: complete info (e.g., "aorist active subjunctive 3rd singular")
+5. question_type: "mood"
+
+Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "mood"}}]}}
+
+Include: indicative, subjunctive, optative, imperative, infinitive, participle."""
+
+        elif concept_type == 'parsing':
+            return f"""Generate {count} flashcards for full morphological parsing.
+Use these words: {', '.join(base_words)}
+
+For each flashcard, provide:
+1. word: the Greek form
+2. answer: abbreviated parsing (e.g., "GSM" for genitive singular masculine, or "AAI3S" for aorist active indicative 3rd singular)
+3. lemma: dictionary form
+4. full_parsing: human-readable (e.g., "genitive singular masculine" or "aorist active indicative 3rd singular")
+5. question_type: "parse"
+
+Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "parse"}}]}}
+
+Mix nouns and verbs. For nouns: case, number, gender. For verbs: tense, voice, mood, person, number."""
+
+        else:  # morphology or other
+            return f"""Generate {count} flashcards testing Greek morphology identification.
+Use these words: {', '.join(base_words)}
+
+For each flashcard, provide:
+1. word: the Greek form
+2. answer: what it is (e.g., "aorist participle", "dative plural")
+3. lemma: dictionary form
+4. full_parsing: complete description
+5. question_type: "identify"
+
+Return JSON: {{"flashcards": [{{"word": "...", "answer": "...", "lemma": "...", "full_parsing": "...", "question_type": "identify"}}]}}"""
+
     # Quiz tools with spaced repetition
     def tool_start_quiz(self, mode: str = "due", count: int = 20,
                         book: Optional[str] = None, chapter: Optional[int] = None,
                         normalize: bool = True) -> Dict[str, Any]:
         """Start a spaced repetition quiz. Mode 'due' uses cards due for review."""
+        logger.info(f"Starting quiz for user {self.user_id}: mode={mode}, count={count}")
 
         if mode == "due":
             # Get due cards from database
@@ -210,27 +404,90 @@ class GreekTutorAgent:
         if not q.get('queue'):
             return {"done": True, "message": "Quiz complete."}
         token = q['queue'].pop(0)
-        # Ask LLM for common glosses
-        r = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "Given a Koine Greek token from the NT, list 3-6 common English glosses (lowercase), short words/phrases only. Reply as JSON: {\"glosses\":[...]}"},
-                {"role": "user", "content": f"Token: {token}"},
-            ],
-            temperature=0.2,
-        )
-        glosses: List[str] = []
+
+        # Fetch card data from database to determine question type
         try:
-            payload = json.loads(r.choices[0].message.content or "{}")
-            glosses = [str(x).lower().strip() for x in payload.get('glosses', []) if str(x).strip()]
+            vocab_data = http_get_json(f"{self.fastapi_url}/vocab/{self.user_id}")
+            card = next((c for c in vocab_data if c.get('vocab_word') == token), None)
         except Exception:
-            glosses = []
-        if not glosses:
-            glosses = ["unknown"]
-        q['current'] = {"token": token, "glosses": glosses}
+            card = None
+
+        # Determine question type and metadata
+        question_type = card.get('question_type', 'meaning') if card else 'meaning'
+        concept_type = card.get('concept_type', 'word') if card else 'word'
+        metadata_str = card.get('metadata') if card else None
+        metadata = {}
+        if metadata_str:
+            try:
+                metadata = json.loads(metadata_str)
+            except Exception:
+                metadata = {}
+
+        # Build question and answer based on question type
+        if question_type == 'case':
+            question = f"What case is '{token}' in?"
+            # Get answer from metadata or use LLM fallback
+            answer = metadata.get('full_parsing', 'unknown').split()[0] if metadata.get('full_parsing') else None
+            if not answer:
+                answer = 'unknown'
+            glosses = [answer.lower()]
+        elif question_type == 'tense':
+            question = f"What tense is '{token}'?"
+            # Extract tense from full_parsing
+            full_parsing = metadata.get('full_parsing', '')
+            answer = full_parsing.split()[0] if full_parsing else 'unknown'
+            glosses = [answer.lower()]
+        elif question_type == 'mood':
+            question = f"What mood is '{token}'?"
+            # Extract mood from full_parsing
+            full_parsing = metadata.get('full_parsing', '')
+            parts = full_parsing.split()
+            # Mood is typically 3rd word (e.g., "aorist active subjunctive")
+            answer = parts[2] if len(parts) > 2 else 'unknown'
+            glosses = [answer.lower()]
+        elif question_type == 'parse':
+            lemma = metadata.get('lemma', '')
+            question = f"Parse '{token}'" + (f" (from {lemma})" if lemma else "")
+            # Answer is the abbreviated parsing
+            answer = metadata.get('full_parsing', 'unknown')
+            glosses = [answer.lower()]
+        elif question_type == 'identify':
+            question = f"Identify the form: {token}"
+            answer = metadata.get('full_parsing', 'unknown')
+            glosses = [answer.lower()]
+        else:  # meaning (default)
+            question = f"What does '{token}' mean?"
+            # Ask LLM for common glosses
+            r = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "Given a Koine Greek token from the NT, list 3-6 common English glosses (lowercase), short words/phrases only. Reply as JSON: {\"glosses\":[...]}"},
+                    {"role": "user", "content": f"Token: {token}"},
+                ],
+                temperature=0.2,
+            )
+            glosses: List[str] = []
+            try:
+                payload = json.loads(r.choices[0].message.content or "{}")
+                glosses = [str(x).lower().strip() for x in payload.get('glosses', []) if str(x).strip()]
+            except Exception:
+                glosses = []
+            if not glosses:
+                glosses = ["unknown"]
+
+        q['current'] = {
+            "token": token,
+            "glosses": glosses,
+            "question_type": question_type,
+            "concept_type": concept_type,
+            "metadata": metadata
+        }
+        # Clear feedback and awaiting_next flag when moving to next question
+        q['last_feedback'] = None
+        q['awaiting_next'] = False
         mem['quiz'] = q
         save_memory(self.user_id, mem)
-        return {"question": f"What does '{token}' mean?", "token": token, "glosses_hint": glosses[:1]}
+        return {"question": question, "token": token, "glosses_hint": glosses[:1], "question_type": question_type}
 
     def tool_grade_quiz_answer(self, user_answer: str) -> Dict[str, Any]:
         mem = load_memory(self.user_id)
@@ -238,31 +495,67 @@ class GreekTutorAgent:
         curr = q.get('current') or {}
         token = curr.get('token')
         glosses = curr.get('glosses') or []
+        question_type = curr.get('question_type', 'meaning')
+        metadata = curr.get('metadata', {})
+
         if not token:
             return {"error": "no current question"}
-        ua = (user_answer or "").strip()
-        # Ask LLM to judge correctness
-        prompt = (
-            "You are grading a vocab quiz. Compare the user's answer to acceptable glosses. "
-            "Return JSON: {\"verdict\": \"correct|partial|incorrect\", \"explanation\": "
-            "short rationale}. Be lenient with synonyms."
-        )
-        r = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps({"token": token, "glosses": glosses, "answer": ua})},
-            ],
-            temperature=0.0,
-        )
-        verdict = "incorrect"
-        expl = ""
-        try:
-            payload = json.loads(r.choices[0].message.content or "{}")
-            verdict = (payload.get('verdict') or 'incorrect').lower()
-            expl = payload.get('explanation') or ''
-        except Exception:
-            pass
+        ua = (user_answer or "").strip().lower()
+
+        # Different grading logic based on question type
+        if question_type in ('case', 'tense', 'mood', 'identify'):
+            # Exact matching for grammatical questions
+            correct_answers = [g.lower() for g in glosses]
+            # Check if user answer matches any acceptable answer
+            if ua in correct_answers:
+                verdict = "correct"
+                expl = f"Correct! The answer is '{glosses[0]}'."
+                if metadata.get('full_parsing'):
+                    expl += f" (Full parsing: {metadata.get('full_parsing', '')})"
+            else:
+                verdict = "incorrect"
+                expl = f"Incorrect. The correct answer is '{glosses[0]}'."
+                if metadata.get('full_parsing'):
+                    expl += f" (Full parsing: {metadata.get('full_parsing', '')})"
+
+        elif question_type == 'parse':
+            # For parsing, allow both abbreviated and full forms
+            correct_answers = [g.lower() for g in glosses]
+            full_parsing = metadata.get('full_parsing', '').lower()
+
+            # Check if matches abbreviated or full form
+            if ua in correct_answers or ua == full_parsing:
+                verdict = "correct"
+                expl = f"Correct! Full parsing: {metadata.get('full_parsing', glosses[0])}"
+            else:
+                verdict = "incorrect"
+                expl = f"Incorrect. The correct parsing is: {metadata.get('full_parsing', glosses[0])}"
+
+        else:  # meaning (default) - use LLM for synonym matching
+            # Ask LLM to judge correctness
+            prompt = (
+                "You are grading a vocab quiz. Compare the user's answer to acceptable glosses. "
+                "Return JSON: {\"verdict\": \"correct|partial|incorrect\", \"explanation\": \"short rationale\"}. "
+                "Be lenient with synonyms. IMPORTANT: In the explanation, ALWAYS include example correct answers. "
+                "Format: 'Correct answers include: [examples]' or 'The main glosses are: [examples]'. "
+                "Even for correct answers, show 1-2 examples to reinforce learning."
+            )
+            r = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps({"token": token, "glosses": glosses, "answer": ua})},
+                ],
+                temperature=0.0,
+            )
+            verdict = "incorrect"
+            expl = ""
+            try:
+                payload = json.loads(r.choices[0].message.content or "{}")
+                verdict = (payload.get('verdict') or 'incorrect').lower()
+                expl = payload.get('explanation') or ''
+            except Exception:
+                pass
 
         # Update stats
         q['asked'] = int(q.get('asked') or 0) + 1
@@ -311,7 +604,14 @@ class GreekTutorAgent:
         except Exception as e:
             pass
 
-        q['current'] = None
+        # Store feedback with the answered question for display
+        q['last_feedback'] = {
+            'token': token,
+            'verdict': verdict,
+            'explanation': expl
+        }
+        # Keep current question for display until user clicks "next"
+        q['awaiting_next'] = True
         mem['quiz'] = q
         save_memory(self.user_id, mem)
         return {"verdict": verdict, "explanation": expl, "asked": q['asked'], "correct": q['correct'], "remaining": len(q.get('queue') or [])}
@@ -358,7 +658,12 @@ class GreekTutorAgent:
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         mem = load_memory(self.user_id)
-        return list(reversed(sorted(mem.get('sessions', []), key=lambda s: s.get('updated_at') or s.get('created_at') or '')))
+        # Only return sessions with at least one user message
+        sessions_with_messages = [
+            s for s in mem.get('sessions', [])
+            if any(msg.get('role') == 'user' for msg in s.get('messages', []))
+        ]
+        return list(reversed(sorted(sessions_with_messages, key=lambda s: s.get('updated_at') or s.get('created_at') or '')))
 
     def summarize_session(self, sid: str) -> Optional[str]:
         mem = load_memory(self.user_id)
@@ -366,6 +671,9 @@ class GreekTutorAgent:
         if not sess:
             return None
         msgs = sess.get('messages', [])
+        # Only summarize if there's at least one user message
+        if not any(msg.get('role') == 'user' for msg in msgs):
+            return None
         # Build a compact transcript
         transcript = []
         for m in msgs[-20:]:
@@ -431,7 +739,15 @@ class GreekTutorAgent:
             vs = verses or []
         if not b or not ch or not vs:
             return []
-        return get_verses(data, b, ch, vs, 'text_grc')
+        result = get_verses(data, b, ch, vs, 'text_grc')
+        # Log verse retrieval activity
+        if result and ref:
+            self._log_activity("verse", ref)
+        elif result and b and ch and vs:
+            # Reconstruct reference for logging
+            verse_ref = f"{b} {ch}:{','.join(map(str, vs))}"
+            self._log_activity("verse", verse_ref)
+        return result
 
     def tool_get_kjv_verses(self, ref: str = "", book: str = "", chapter: Optional[int] = None, verses: Optional[List[int]] = None):
         data = load_kjv()
@@ -651,6 +967,110 @@ class GreekTutorAgent:
                     pass
         return result
 
+    def tool_get_learning_suggestions(self) -> Dict[str, Any]:
+        """
+        Generate personalized learning suggestions based on user's level,
+        mastered concepts, vocabulary progress, interests, and chat history.
+        """
+        mem = load_memory(self.user_id)
+        level = mem.get('level') or 'beginner'
+
+        # Gather user data
+        try:
+            # Get mastered concepts
+            concepts = http_get_json(f"{self.fastapi_url}/concepts/{self.user_id}")
+            mastered_concepts = [c.get('concept_name') for c in concepts]
+
+            # Get vocabulary stats
+            vocab_data = http_get_json(f"{self.fastapi_url}/vocab/{self.user_id}")
+            total_vocab = len(vocab_data)
+            avg_mastery = sum(v.get('mastery_score', 0) for v in vocab_data) / max(total_vocab, 1)
+            weak_areas = [v for v in vocab_data if v.get('mastery_score', 0) < 0.5][:5]
+
+            # Get user interests
+            interests = http_get_json(f"{self.fastapi_url}/interests/{self.user_id}")
+
+            # Get recent session summaries for context
+            sessions = mem.get('sessions', [])
+            recent_summaries = [s.get('summary') or s.get('title') for s in sessions[-3:] if s.get('summary') or s.get('title')]
+
+        except Exception as e:
+            # Fallback if API fails
+            mastered_concepts = []
+            total_vocab = 0
+            avg_mastery = 0
+            weak_areas = []
+            interests = []
+            recent_summaries = []
+
+        # Build context for LLM suggestion engine
+        context = {
+            "level": level,
+            "mastered_concepts": mastered_concepts[:20],  # limit to recent 20
+            "total_vocabulary": total_vocab,
+            "average_mastery": round(avg_mastery, 2),
+            "weak_vocabulary_examples": [v.get('vocab_word') for v in weak_areas],
+            "interests": [
+                {
+                    "type": i.get('interest_type'),
+                    "topic": i.get('topic'),
+                    "book": i.get('book'),
+                    "chapter": i.get('chapter')
+                } for i in interests[:10]
+            ],
+            "recent_session_topics": recent_summaries
+        }
+
+        # Use LLM to generate intelligent, contextual suggestions
+        prompt = (
+            "You are an expert Biblical Greek pedagogy advisor. Based on the student's learning data below, "
+            "provide 3-5 specific, actionable learning suggestions. Each suggestion should:\n"
+            "1. Build on what they've learned\n"
+            "2. Address identified weak areas\n"
+            "3. Align with their interests when possible\n"
+            "4. Be appropriate for their current level\n"
+            "5. Include a clear next step\n\n"
+            "Format as JSON: {\"suggestions\": [{\"title\": \"...\", \"description\": \"...\", \"action\": \"...\"}, ...]}\n\n"
+            f"Student Data:\n{json.dumps(context, indent=2, ensure_ascii=False)}"
+        )
+
+        try:
+            r = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You provide personalized learning path recommendations for Biblical Greek students."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.6,
+            )
+
+            result = json.loads(r.choices[0].message.content or "{}")
+            suggestions = result.get('suggestions', [])
+
+            return {
+                "level": level,
+                "total_concepts_mastered": len(mastered_concepts),
+                "total_vocabulary": total_vocab,
+                "average_mastery": round(avg_mastery, 2),
+                "suggestions": suggestions
+            }
+        except Exception as e:
+            # Fallback suggestions
+            return {
+                "level": level,
+                "total_concepts_mastered": len(mastered_concepts),
+                "total_vocabulary": total_vocab,
+                "average_mastery": round(avg_mastery, 2),
+                "suggestions": [
+                    {
+                        "title": "Review vocabulary",
+                        "description": "Continue practicing your vocabulary cards to build retention.",
+                        "action": "Start a quiz session with cards due for review."
+                    }
+                ],
+                "error": str(e)
+            }
+
     # Tool schemas for function calling
     def tool_schemas(self) -> List[Dict[str, Any]]:
         return [
@@ -727,10 +1147,10 @@ class GreekTutorAgent:
                 "type": "function",
                 "function": {
                     "name": "insert_concept_mastery",
-                    "description": "Insert a mastered concept for the user.",
+                    "description": "Mark a concept as mastered by the user. Call this after successfully explaining a concept and the user demonstrates understanding (e.g., by answering a follow-up question correctly, completing exercises, or confirming they understand). Examples: 'Aorist Tense', 'Greek Cases', 'Present Active Indicative', 'Participles'.",
                     "parameters": {
                         "type": "object",
-                        "properties": {"concept_name": {"type": "string"}},
+                        "properties": {"concept_name": {"type": "string", "description": "Name of the Greek grammar/syntax concept mastered"}},
                         "required": ["concept_name"],
                     },
                 },
@@ -870,6 +1290,42 @@ class GreekTutorAgent:
                     "parameters": {"type": "object", "properties": {}},
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_learning_suggestions",
+                    "description": "Generate personalized learning suggestions based on the user's level, mastered concepts, vocabulary progress, interests, and learning history. Use this when the user asks for guidance, is stuck, completes a major milestone, or when suggesting next steps.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "generate_concept_flashcards",
+                    "description": "Generate flashcards for advanced grammatical concepts (cases, tenses, moods, parsing, morphology). Use this when the user wants to practice Greek grammar beyond simple vocabulary meanings. Examples: 'test me on noun cases', 'quiz me on verb tenses', 'practice aorist forms'.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "concept_type": {
+                                "type": "string",
+                                "enum": ["case", "tense", "mood", "parsing", "morphology"],
+                                "description": "Type of grammatical concept: case (noun declensions), tense (verb tenses), mood (verb moods), parsing (full morphological analysis), morphology (general morphology)"
+                            },
+                            "count": {
+                                "type": "integer",
+                                "default": 20,
+                                "description": "Number of flashcards to generate"
+                            },
+                            "base_words": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional list of Greek lemmas to use as base words (e.g., ['λόγος', 'λύω']). If not provided, common NT words will be used."
+                            }
+                        },
+                        "required": ["concept_type"]
+                    },
+                },
+            },
         ]
 
     def handle_tool_call(self, name: str, arguments: Dict[str, Any]) -> str:
@@ -915,16 +1371,31 @@ class GreekTutorAgent:
             return json.dumps(self.tool_generate_and_insert_vocab(
                 arguments.get('mode', 'global'), int(arguments.get('count', 20)), arguments.get('book'), arguments.get('chapter'), bool(arguments.get('normalize', True))
             ))
+        if name == 'get_learning_suggestions':
+            return json.dumps(self.tool_get_learning_suggestions())
+        if name == 'generate_concept_flashcards':
+            return json.dumps(self.tool_generate_concept_flashcards(
+                arguments.get('concept_type', 'case'),
+                int(arguments.get('count', 20)),
+                arguments.get('base_words')
+            ))
         return json.dumps({"error": f"unknown tool {name}"})
 
     def chat(self, user_text: str) -> str:
+        logger.debug(f"Chat invoked for user {self.user_id}: {user_text[:100]}...")
         # Load latest memory to include any external updates
         self.memory = load_memory(self.user_id)
         system = (
             "You are a friendly, concise Biblical Greek tutor. "
             "You can call tools to explain concepts, show Greek NT examples, retrieve/store vocab progress, record interests, and run a lightweight vocab quiz. "
             "Quiz flow: when the user asks to be quizzed, call start_quiz with appropriate scope, then next_quiz_question, then on user reply call grade_quiz_answer, then either next_quiz_question or end_quiz if done. "
-            "Only call set_user_level if the user explicitly requests a level change. Do not infer from quiz answers."
+            "Only call set_user_level if the user explicitly requests a level change. Do not infer from quiz answers.\n\n"
+            "IMPORTANT - Proactive Guidance:\n"
+            "- When a user completes a concept explanation, call insert_concept_mastery to track their progress.\n"
+            "- When appropriate (e.g., user asks 'what should I learn next?', completes a quiz, seems stuck, or finishes a lesson), "
+            "call get_learning_suggestions to provide personalized next steps based on their level, mastered concepts, vocabulary progress, and interests.\n"
+            "- Present suggestions naturally and conversationally, not as a raw data dump.\n"
+            "- Focus on one or two most relevant suggestions rather than overwhelming the user."
         )
         level = self.memory.get('level')
         memory_preamble = f"Student level: {level}." if level else "Student level unknown; you may ask."
@@ -936,7 +1407,8 @@ class GreekTutorAgent:
         ]
 
         # Re-usable loop to process tool calls
-        for _ in range(3):
+        for iteration in range(3):
+            logger.debug(f"Chat iteration {iteration+1} for user {self.user_id}")
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -952,6 +1424,7 @@ class GreekTutorAgent:
                 ]})
                 for tc in msg.tool_calls:
                     args = json.loads(tc.function.arguments or "{}")
+                    logger.debug(f"Executing tool '{tc.function.name}' for user {self.user_id}")
                     result = self.handle_tool_call(tc.function.name, args)
                     messages.append({
                         "role": "tool",

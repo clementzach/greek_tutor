@@ -5,11 +5,13 @@
   <aside class="sidebar">
     <div class="sidebar-header">
       <div class="title">Chats</div>
-      <form method="post" action="/new_chat" style="margin:0">
+      <form method="post" action="{{ url_for('new_chat') }}" style="margin:0">
         <button type="submit">New Chat</button>
       </form>
     </div>
-    <ul class="chat-list">
+    {% if sessions %}
+    <button type="button" id="toggle-history" style="width:100%; margin-bottom:0.5rem;">See Previous Chats</button>
+    <ul class="chat-list" id="chat-history" style="display:none">
       {% for s in sessions %}
         <li>
           <a href="{{ url_for('tutor', sid=s.id) }}" class="chat-link">
@@ -18,16 +20,15 @@
           </a>
           <div class="chat-actions">
             <button type="button" onclick="renameChat('{{ s.id }}')">Rename</button>
-            <form method="post" action="/delete_chat" style="display:inline" onsubmit="return confirm('Delete this chat?')">
+            <form method="post" action="{{ url_for('delete_chat') }}" style="display:inline" onsubmit="return confirm('Delete this chat?')">
               <input type="hidden" name="sid" value="{{ s.id }}">
               <button type="submit" class="danger">Delete</button>
             </form>
           </div>
         </li>
-      {% else %}
-        <li class="muted">No past chats yet.</li>
       {% endfor %}
     </ul>
+    {% endif %}
   </aside>
   <section class="main">
 {% if quiz %}
@@ -36,21 +37,67 @@
       <strong>Quiz</strong>
       <span class="muted">Progress: {{ quiz.asked }}/{{ quiz.total }} | Remaining: {{ quiz.remaining }}</span>
     </div>
-    {% if quiz.question %}
+    {% if quiz.feedback and quiz.awaiting_next %}
+      <div class="quiz-question">What does '{{ quiz.feedback.token }}' mean?</div>
+    {% elif quiz.question %}
       <div class="quiz-question">{{ quiz.question }}</div>
     {% else %}
       <div class="quiz-question muted">Preparing next question...</div>
     {% endif %}
-    <form method="post" class="inline" id="quiz-form" style="margin-top:.5rem;">
-      <input type="hidden" name="action" value="answer_quiz">
-      <textarea name="message" id="quiz-answer" rows="2" placeholder="Type your answer and press Enter (Shift+Enter newline)"></textarea>
-      <div style="display:flex; gap:.5rem;">
-        <button type="submit">Submit Answer</button>
-        <button type="submit" name="action" value="end_quiz">End Quiz</button>
+    {% if quiz.feedback %}
+      <div class="quiz-feedback {% if quiz.feedback.verdict == 'correct' %}correct{% elif quiz.feedback.verdict == 'partial' %}partial{% else %}incorrect{% endif %}">
+        <strong>{{ quiz.feedback.verdict|capitalize }}</strong>
+        {% if quiz.feedback.explanation %}
+          <span>{{ quiz.feedback.explanation }}</span>
+        {% endif %}
       </div>
+    {% endif %}
+    <form method="post" class="inline" id="quiz-form" style="margin-top:.5rem;">
+      {% if quiz.awaiting_next %}
+        <input type="hidden" name="action" value="next_question">
+        <div style="display:flex; gap:.5rem;">
+          <button type="submit">Next</button>
+          <button type="submit" name="action" value="end_quiz">End Quiz</button>
+        </div>
+      {% else %}
+        <input type="hidden" name="action" value="answer_quiz">
+        <textarea name="message" id="quiz-answer" rows="2" placeholder="Type your answer and press Enter (Shift+Enter newline)"></textarea>
+        <div style="display:flex; gap:.5rem;">
+          <button type="submit">Submit Answer</button>
+          <button type="submit" name="action" value="end_quiz">End Quiz</button>
+        </div>
+      {% endif %}
     </form>
   </div>
 {% endif %}
+
+{% if chat|length == 0 and not quiz and suggestions %}
+<div class="suggestion-cards">
+  <h3 style="margin-bottom:1rem; color:#666;">What would you like to do?</h3>
+  <div class="cards-grid">
+    <div class="suggestion-card" data-action="concepts" data-concept="{{ suggestions.concept }}">
+      <h4>Learn a Concept</h4>
+      <p>Explore Greek grammar, syntax, and morphology based on what you've already mastered.</p>
+      <div class="detail">Try: {{ suggestions.concept }}</div>
+    </div>
+    <div class="suggestion-card" data-action="verse" data-verse="{{ suggestions.verse }}">
+      <h4>Read & Translate a Verse</h4>
+      <p>Work through a Greek verse word-by-word with glosses and grammatical explanations.</p>
+      <div class="detail">Suggested: {{ suggestions.verse }}</div>
+    </div>
+    <div class="suggestion-card" data-action="flashcards">
+      <h4>Review Flashcards</h4>
+      <p>Practice vocabulary with spaced repetition to build retention.</p>
+      {% if suggestions.due_count > 0 %}
+      <div class="detail">{{ suggestions.due_count }} cards due</div>
+      {% else %}
+      <div class="detail">Start building your deck!</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <div class="chat">
   {% for m in chat %}
     <div class="msg {{ m.role }}">
@@ -62,13 +109,29 @@
 
 <form method="post" class="chat-input" id="chat-form">
   <textarea name="message" id="chat-message" rows="3" placeholder="Ask about a concept or practice vocab... (Shift+Enter for newline)"></textarea>
-  <button type="submit">Send</button>
+  <button type="submit" id="chat-send-btn">Send</button>
 </form>
 <script>
   (function(){
     const form = document.getElementById('chat-form');
     const ta = document.getElementById('chat-message');
-    if (form && ta) {
+    const sendBtn = document.getElementById('chat-send-btn');
+    let isSubmitting = false;
+
+    if (form && ta && sendBtn) {
+      // Prevent multiple submissions
+      form.addEventListener('submit', function(e){
+        if (isSubmitting) {
+          e.preventDefault();
+          return false;
+        }
+        isSubmitting = true;
+        sendBtn.disabled = true;
+        sendBtn.textContent = 'Sending...';
+        sendBtn.style.opacity = '0.6';
+        sendBtn.style.cursor = 'not-allowed';
+      });
+
       ta.addEventListener('keydown', function(e){
         if (e.isComposing) return; // IME input in progress
         if (e.key === 'Enter') {
@@ -77,7 +140,9 @@
             return;
           }
           e.preventDefault();
-          if (form.requestSubmit) form.requestSubmit(); else form.submit();
+          if (!isSubmitting) {
+            if (form.requestSubmit) form.requestSubmit(); else form.submit();
+          }
         }
       });
     }
@@ -99,7 +164,7 @@
   </script>
   </section>
 </div>
-<form method="post" action="/rename_chat" id="rename-form" style="display:none">
+<form method="post" action="{{ url_for('rename_chat') }}" id="rename-form" style="display:none">
   <input type="hidden" name="sid" id="rename-sid">
   <input type="hidden" name="title" id="rename-title">
 </form>
@@ -118,12 +183,106 @@
     function send(){
       if (navigator.sendBeacon) {
         const blob = new Blob([payload], {type: 'application/json'});
-        navigator.sendBeacon('/autosummarize', blob);
+        navigator.sendBeacon('{{ url_for("autosummarize") }}', blob);
       } else {
-        fetch('/autosummarize', {method:'POST', headers:{'Content-Type':'application/json'}, body: payload}).catch(()=>{});
+        fetch('{{ url_for("autosummarize") }}', {method:'POST', headers:{'Content-Type':'application/json'}, body: payload}).catch(()=>{});
       }
     }
     window.addEventListener('beforeunload', send);
+  })();
+
+  // Toggle chat history visibility
+  (function(){
+    const toggleBtn = document.getElementById('toggle-history');
+    const chatHistory = document.getElementById('chat-history');
+    if (toggleBtn && chatHistory) {
+      toggleBtn.addEventListener('click', function(){
+        if (chatHistory.style.display === 'none') {
+          chatHistory.style.display = 'block';
+          toggleBtn.textContent = 'Hide Previous Chats';
+        } else {
+          chatHistory.style.display = 'none';
+          toggleBtn.textContent = 'See Previous Chats';
+        }
+      });
+    }
+  })();
+
+  // Suggestion card handlers with improved touch support
+  (function(){
+    const cards = document.querySelectorAll('.suggestion-card');
+    const chatInput = document.getElementById('chat-message');
+    const chatForm = document.getElementById('chat-form');
+
+    if (!chatInput || !chatForm) {
+      console.error('Chat input or form not found');
+      return;
+    }
+
+    cards.forEach(card => {
+      // Prevent double-firing on touch devices
+      let touchHandled = false;
+
+      const handleAction = function(e) {
+        e.preventDefault();
+
+        if (touchHandled) {
+          touchHandled = false;
+          return;
+        }
+
+        // Find the card element (in case a child was clicked)
+        let cardElement = e.target;
+        while (cardElement && !cardElement.classList.contains('suggestion-card')) {
+          cardElement = cardElement.parentElement;
+        }
+
+        if (!cardElement) {
+          console.error('Could not find suggestion-card element');
+          return;
+        }
+
+        const action = cardElement.getAttribute('data-action');
+        const concept = cardElement.getAttribute('data-concept');
+        const verse = cardElement.getAttribute('data-verse');
+        let message = '';
+
+        console.log('Card clicked:', action, 'concept:', concept, 'verse:', verse);
+
+        if (action === 'concepts' && concept) {
+          message = `Can you teach me about ${concept}?`;
+        } else if (action === 'verse' && verse) {
+          message = `Can you help me read and translate ${verse} word by word?`;
+        } else if (action === 'flashcards') {
+          message = 'I want to review my vocabulary flashcards.';
+        }
+
+        console.log('Message:', message);
+        console.log('chatInput:', chatInput, 'chatForm:', chatForm);
+
+        if (message) {
+          chatInput.value = message;
+          console.log('Submitting form...');
+          if (chatForm.requestSubmit) {
+            chatForm.requestSubmit();
+          } else {
+            chatForm.submit();
+          }
+        }
+      };
+
+      // Use touchend for mobile, click for desktop
+      card.addEventListener('touchend', function(e) {
+        touchHandled = true;
+        handleAction(e);
+      });
+
+      card.addEventListener('click', function(e) {
+        if (!touchHandled) {
+          handleAction(e);
+        }
+      });
+    });
   })();
 </script>
 {% endblock %}

@@ -19,6 +19,10 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from agent.agent import GreekTutorAgent, load_memory, save_memory
+from config.logging_config import get_flask_logger, log_request, log_error
+
+# Initialize logger
+logger = get_flask_logger()
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 USERS_PATH = os.path.join(DATA_DIR, 'users.json')
 FASTAPI_URL = os.environ.get('FASTAPI_URL', 'http://127.0.0.1:8000')
@@ -76,6 +80,10 @@ def create_app():
     app.config['APPLICATION_ROOT'] = '/greek'
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
+    logger.info("Flask application starting...")
+    logger.info(f"Application root: {app.config['APPLICATION_ROOT']}")
+    logger.info(f"FastAPI URL: {FASTAPI_URL}")
+
     @app.route('/')
     def index():
         if 'user_id' in session:
@@ -87,10 +95,13 @@ def create_app():
         if request.method == 'POST':
             username = request.form.get('username', '').strip()
             password = request.form.get('password', '')
+            logger.info(f"Registration attempt for username: {username}")
             if not username or not password:
+                logger.warning(f"Registration failed: missing credentials for {username}")
                 flash('Username and password required.', 'error')
                 return render_template('register.html')
             if get_user_by_username(username):
+                logger.warning(f"Registration failed: username '{username}' already exists")
                 flash('Username already exists.', 'error')
                 return render_template('register.html')
             data = load_users()
@@ -102,6 +113,7 @@ def create_app():
                 'created_at': datetime.utcnow().isoformat(),
             })
             save_users(data)
+            logger.info(f"User registered successfully: {username}")
             flash('Registration successful. Please log in.', 'success')
             return redirect(url_for('login'))
         return render_template('register.html')
@@ -111,17 +123,22 @@ def create_app():
         if request.method == 'POST':
             username = request.form.get('username', '').strip()
             password = request.form.get('password', '')
+            logger.info(f"Login attempt for username: {username}")
             u = get_user_by_username(username)
             if not u or not check_password_hash(u.get('password_hash', ''), password):
+                logger.warning(f"Login failed for username: {username}")
                 flash('Invalid credentials.', 'error')
                 return render_template('login.html')
             session['user_id'] = u['id']
             session['username'] = u['username']
+            logger.info(f"User logged in successfully: {username}")
             return redirect(url_for('dashboard'))
         return render_template('login.html')
 
     @app.route('/logout')
     def logout():
+        user_id = session.get('user_id', 'unknown')
+        logger.info(f"Logout initiated for user: {user_id}")
         # Try summarizing before logout
         try:
             if 'user_id' in session:
@@ -131,36 +148,68 @@ def create_app():
                 cur_sess = next((s for s in mem.get('sessions', []) if s.get('id') == current_sid), None)
                 if current_sid and cur_sess and cur_sess.get('messages'):
                     agent.summarize_session(current_sid)
-        except Exception:
-            pass
+                    logger.debug(f"Session {current_sid} summarized for user {user_id}")
+        except Exception as e:
+            log_error(logger, e, f"Session summarization during logout for user {user_id}")
         session.clear()
+        logger.info(f"User logged out: {user_id}")
         return redirect(url_for('login'))
 
     @app.route('/dashboard')
     @login_required
     def dashboard():
         user_id = session['user_id']
+        logger.debug(f"Dashboard accessed by user: {user_id}")
         mem = load_memory(user_id)
         level = mem.get('level')
         # Load interests and due cards count
         interests = []
         due_count = 0
         total_vocab = 0
+        total_reviewed = 0
+        mastered_count = 0
+
         try:
             interests = http_get_json(f"{FASTAPI_URL}/interests/{user_id}")
-        except Exception:
+        except Exception as e:
+            log_error(logger, e, f"Failed to load interests for user {user_id}")
             interests = []
+
         try:
             due_cards = http_get_json(f"{FASTAPI_URL}/vocab/{user_id}/due", {"limit": 1000})
             due_count = len(due_cards)
-        except Exception:
+        except Exception as e:
+            log_error(logger, e, f"Failed to load due cards for user {user_id}")
             due_count = 0
+
         try:
             all_vocab = http_get_json(f"{FASTAPI_URL}/vocab/{user_id}")
             total_vocab = len(all_vocab)
-        except Exception:
+            # Calculate total reviewed (cards with times_reviewed > 0)
+            total_reviewed = sum(1 for v in all_vocab if v.get('times_reviewed', 0) > 0)
+        except Exception as e:
+            log_error(logger, e, f"Failed to load vocabulary for user {user_id}")
             total_vocab = 0
-        return render_template('dashboard.html', level=level, interests=interests, due_count=due_count, total_vocab=total_vocab)
+            total_reviewed = 0
+
+        try:
+            concepts = http_get_json(f"{FASTAPI_URL}/concepts/{user_id}")
+            mastered_count = len(concepts)
+        except Exception as e:
+            log_error(logger, e, f"Failed to load concepts for user {user_id}")
+            mastered_count = 0
+
+        # Compute default quiz count for template
+        default_quiz_count = min(due_count, 20)
+
+        return render_template('dashboard.html',
+                             level=level,
+                             interests=interests,
+                             due_count=due_count,
+                             total_vocab=total_vocab,
+                             total_reviewed=total_reviewed,
+                             mastered_count=mastered_count,
+                             default_quiz_count=default_quiz_count)
 
     @app.route('/set_level', methods=['POST'])
     @login_required
@@ -177,6 +226,7 @@ def create_app():
     @login_required
     def tutor():
         user_id = session['user_id']
+        logger.debug(f"Tutor page accessed by user: {user_id}")
         agent = GreekTutorAgent(user_id=user_id)
         mem = load_memory(user_id)
         chat = mem.get('chat', [])
@@ -185,6 +235,7 @@ def create_app():
         # Quiz state
         quiz = (mem.get('quiz') or {})
         quiz_active = bool(quiz.get('active'))
+        quiz_feedback = None  # Store feedback for display in quiz card
         # Session handling
         sid_param = request.args.get('sid')
         new_param = request.args.get('new')
@@ -212,25 +263,32 @@ def create_app():
             user_text = request.form.get('message', '').strip()
             try:
                 if action == 'end_quiz' and quiz_active:
+                    logger.info(f"User {user_id} ending quiz")
                     summary = agent.tool_end_quiz()
                     flash(f"Quiz ended. Score: {summary.get('correct', 0)}/{summary.get('asked', 0)}.", 'success')
-                elif quiz_active and (quiz.get('current') or {}).get('token') and user_text:
-                    # Grade answer, then advance
-                    result = agent.tool_grade_quiz_answer(user_text)
-                    verdict = result.get('verdict', 'graded')
-                    expl = result.get('explanation') or ''
-                    remaining = result.get('remaining', 0)
-                    flash(f"Answer: {verdict}. {expl}", 'success' if verdict == 'correct' else 'error')
+                elif action == 'next_question' and quiz_active:
+                    # Move to next question
+                    remaining = len(quiz.get('queue') or [])
                     if remaining > 0:
                         agent.tool_next_quiz_question()
                     else:
+                        logger.info(f"User {user_id} completed quiz")
                         summary = agent.tool_end_quiz()
                         flash(f"Quiz complete. Score: {summary.get('correct', 0)}/{summary.get('total', 0)}.", 'success')
+                elif quiz_active and (quiz.get('current') or {}).get('token') and user_text and not quiz.get('awaiting_next'):
+                    # Grade answer - don't auto-advance
+                    logger.debug(f"Grading quiz answer for user {user_id}")
+                    result = agent.tool_grade_quiz_answer(user_text)
+                    verdict = result.get('verdict', 'graded')
+                    expl = result.get('explanation') or ''
+                    # Feedback will be stored in quiz state by the agent
                 else:
                     # Regular chat
                     if user_text:
+                        logger.info(f"Chat message from user {user_id}: {user_text[:50]}...")
                         reply = agent.chat(user_text)
             except Exception as e:
+                log_error(logger, e, f"Error during tutoring for user {user_id}")
                 reply = f"Error during tutoring: {e}"
             # Refresh state after handling
             mem = load_memory(user_id)
@@ -259,9 +317,15 @@ def create_app():
             html = md.markdown(text or '', extensions=['fenced_code', 'tables', 'sane_lists', 'nl2br'])
             clean = bleach.clean(html, tags=allowed_tags, attributes=allowed_attrs, strip=True)
             return Markup(clean)
-        # reload chat after any update
+        # reload chat from active session
         mem = load_memory(user_id)
-        raw_chat = mem.get('chat', [])
+        active_sid = mem.get('active_session_id')
+        raw_chat = []
+        if active_sid:
+            active_sess = next((s for s in mem.get('sessions', []) if s.get('id') == active_sid), None)
+            if active_sess:
+                raw_chat = active_sess.get('messages', [])
+
         display_chat = []
         for m in raw_chat:
             display_chat.append({'role': m.get('role'), 'html': to_html(m.get('content', ''))})
@@ -275,12 +339,17 @@ def create_app():
             asked = int(quiz.get('asked') or 0)
             total = int(quiz.get('total') or max(asked, 0))
             remaining = len(quiz.get('queue') or [])
+            awaiting_next = quiz.get('awaiting_next', False)
+            last_feedback = quiz.get('last_feedback')
+
             if token:
                 quiz_display = {
                     'question': f"What does '{token}' mean?",
                     'asked': asked,
                     'total': total,
                     'remaining': remaining,
+                    'feedback': last_feedback,
+                    'awaiting_next': awaiting_next,
                 }
             else:
                 quiz_display = {
@@ -288,8 +357,99 @@ def create_app():
                     'asked': asked,
                     'total': total,
                     'remaining': remaining,
+                    'feedback': last_feedback,
+                    'awaiting_next': awaiting_next,
                 }
-        return render_template('tutor.html', chat=display_chat, latest_reply_html=latest_reply_html, quiz=quiz_display, sessions=sessions)
+
+        # Build personalized suggestions for empty chat
+        suggestions = None
+        if len(display_chat) == 0 and not quiz_active:
+            # Get user level and interests for personalization
+            level = mem.get('level') or 'beginner'
+            try:
+                interests_data = http_get_json(f"{FASTAPI_URL}/interests/{user_id}")
+            except Exception:
+                interests_data = []
+
+            # Get completed activities to avoid repetition
+            try:
+                completed_concepts = set()
+                completed_verses = set()
+                activities = http_get_json(f"{FASTAPI_URL}/activities/{user_id}")
+                for act in activities:
+                    if act.get('activity_type') == 'concept':
+                        completed_concepts.add(act.get('activity_value'))
+                    elif act.get('activity_type') == 'verse':
+                        completed_verses.add(act.get('activity_value'))
+            except Exception:
+                completed_concepts = set()
+                completed_verses = set()
+
+            # Try to get mastered concepts
+            try:
+                concepts_data = http_get_json(f"{FASTAPI_URL}/concepts/{user_id}")
+                mastered_concepts = [c.get('concept_name') for c in concepts_data]
+            except Exception:
+                mastered_concepts = []
+
+            # Personalize concept suggestion based on level and mastered concepts
+            # Progressive concept curriculum
+            concept_suggestions = {
+                'beginner': ['Greek Alphabet', 'Basic Nouns', 'Present Tense Verbs', 'Article Usage', 'Basic Adjectives', 'Pronouns', 'Prepositions'],
+                'intermediate': ['Aorist Tense', 'Participles', 'Infinitives', 'Greek Cases', 'Imperfect Tense', 'Middle Voice', 'Dependent Clauses'],
+                'advanced': ['Conditional Sentences', 'Subjunctive Mood', 'Optative Mood', 'Discourse Analysis', 'Textual Criticism', 'Rhetorical Devices']
+            }
+
+            level_key = 'beginner'
+            if level and ('intermediate' in level.lower() or 'b1' in level.lower() or 'b2' in level.lower()):
+                level_key = 'intermediate'
+            elif level and ('advanced' in level.lower() or 'c1' in level.lower() or 'c2' in level.lower()):
+                level_key = 'advanced'
+
+            # Filter out both mastered and already-engaged concepts
+            all_completed = completed_concepts.union(set(mastered_concepts))
+            available_concepts = [c for c in concept_suggestions.get(level_key, concept_suggestions['beginner']) if c not in all_completed]
+            suggested_concept = available_concepts[0] if available_concepts else 'Greek Grammar Review'
+
+            # Find a verse from user interests that hasn't been translated yet
+            suggested_verse = None
+            for interest in interests_data:
+                verse_ref = None
+                if interest.get('interest_type') == 'passage' and interest.get('passage_ref'):
+                    verse_ref = f"{interest.get('book')} {interest.get('chapter')}:{interest.get('passage_ref')}"
+                elif interest.get('interest_type') == 'chapter' and interest.get('book') and interest.get('chapter'):
+                    verse_ref = f"{interest.get('book')} {interest.get('chapter')}:1"
+                elif interest.get('interest_type') == 'book' and interest.get('book'):
+                    verse_ref = f"{interest.get('book')} 1:1"
+
+                if verse_ref and verse_ref not in completed_verses:
+                    suggested_verse = verse_ref
+                    break
+
+            # Fallback to default verses if no interests or all completed
+            if not suggested_verse:
+                default_verses = ["John 3:16", "John 1:1", "Romans 3:23", "Philippians 2:5", "1 John 4:8"]
+                for v in default_verses:
+                    if v not in completed_verses:
+                        suggested_verse = v
+                        break
+                if not suggested_verse:
+                    suggested_verse = "John 3:16"
+
+            # Get due cards count
+            try:
+                due_cards = http_get_json(f"{FASTAPI_URL}/vocab/{user_id}/due", {"limit": 1000})
+                due_count = len(due_cards)
+            except Exception:
+                due_count = 0
+
+            suggestions = {
+                'concept': suggested_concept,
+                'verse': suggested_verse,
+                'due_count': due_count
+            }
+
+        return render_template('tutor.html', chat=display_chat, latest_reply_html=latest_reply_html, quiz=quiz_display, sessions=sessions, suggestions=suggestions)
 
     @app.post('/new_chat')
     @login_required
@@ -354,21 +514,76 @@ def create_app():
         chapter_str = request.form.get('chapter', '').strip()
         passage_ref = request.form.get('passage_ref', '').strip() or None
         chapter = int(chapter_str) if chapter_str.isdigit() else None
+
+        # Get vocab generation options
+        generate_vocab = request.form.get('generate_vocab') == 'on'
+        count_str = request.form.get('count', '20')
+        normalize = request.form.get('normalize') == 'on'
+
+        # Validate interest type
         if itype not in ('topic', 'book', 'chapter', 'passage'):
             flash('Select a valid interest type.', 'error')
-        else:
+            return redirect(url_for('dashboard'))
+
+        # Always record the interest
+        try:
+            http_post_json(f"{FASTAPI_URL}/interests", {
+                'user_id': user_id,
+                'interest_type': itype,
+                'topic': topic,
+                'book': book,
+                'chapter': chapter,
+                'passage_ref': passage_ref,
+            })
+            flash('Interest recorded.', 'success')
+        except Exception as e:
+            flash(f'Failed to save interest: {e}', 'error')
+            return redirect(url_for('dashboard'))
+
+        # Optionally generate vocabulary
+        if generate_vocab:
             try:
-                http_post_json(f"{FASTAPI_URL}/interests", {
-                    'user_id': user_id,
-                    'interest_type': itype,
-                    'topic': topic,
-                    'book': book,
-                    'chapter': chapter,
-                    'passage_ref': passage_ref,
-                })
-                flash('Interest recorded.', 'success')
+                agent = GreekTutorAgent(user_id=user_id)
+
+                # Determine mode based on interest type
+                if itype == 'chapter' or itype == 'passage':
+                    mode = 'chapter'
+                elif itype == 'book':
+                    mode = 'book'
+                else:  # topic
+                    mode = 'global'
+
+                count = int(count_str) if count_str.isdigit() else 20
+                res = agent.tool_generate_and_insert_vocab(
+                    mode=mode,
+                    count=count,
+                    book=book,
+                    chapter=chapter,
+                    normalize=normalize
+                )
+
+                if 'error' in res:
+                    flash(f"Vocab generation failed: {res['error']}", 'warning')
+                else:
+                    inserted = res.get('inserted', [])
+                    flash(f"Generated {len(inserted)} vocabulary words from your interest.", 'success')
+
+                    # Log vocab set summary
+                    try:
+                        http_post_json(f"{FASTAPI_URL}/vocab_sets", {
+                            'user_id': user_id,
+                            'mode': mode,
+                            'book': book,
+                            'chapter': chapter,
+                            'count_requested': count,
+                            'count_inserted': len(inserted),
+                            'source': res.get('source'),
+                        })
+                    except Exception:
+                        pass
             except Exception as e:
-                flash(f'Failed to save interest: {e}', 'error')
+                flash(f"Could not generate vocabulary: {e}", 'warning')
+
         return redirect(url_for('dashboard'))
 
     @app.post('/generate_vocab')
@@ -389,6 +604,22 @@ def create_app():
             else:
                 inserted = res_json.get('inserted', [])
                 flash(f"Inserted {len(inserted)} words.", 'success')
+
+                # Auto-record interest when generating vocab from book or chapter
+                if mode in ('book', 'chapter') and book:
+                    try:
+                        interest_type = 'chapter' if mode == 'chapter' else 'book'
+                        http_post_json(f"{FASTAPI_URL}/interests", {
+                            'user_id': user_id,
+                            'interest_type': interest_type,
+                            'topic': None,
+                            'book': book,
+                            'chapter': chapter if mode == 'chapter' else None,
+                            'passage_ref': None,
+                        })
+                    except Exception:
+                        pass  # Don't fail if interest recording fails
+
         except Exception as e:
             flash(f'Failed to generate vocab: {e}', 'error')
         # Log vocab set summary
@@ -411,16 +642,20 @@ def create_app():
     def start_quiz():
         user_id = session['user_id']
         count_str = request.form.get('count', '20')
+        logger.info(f"User {user_id} starting quiz with {count_str} questions")
         try:
             agent = GreekTutorAgent(user_id=user_id)
             # Always use 'due' mode for spaced repetition
             res = agent.tool_start_quiz(mode='due', count=int(count_str or 20))
             if 'error' in res:
+                logger.warning(f"Quiz start failed for user {user_id}: {res['error']}")
                 flash(f"Quiz not started: {res['error']}", 'error')
                 return redirect(url_for('dashboard'))
+            logger.info(f"Quiz started for user {user_id} with {res.get('total', 0)} questions")
             flash(f"Quiz started with {res.get('total', 0)} questions.", 'success')
             return redirect(url_for('tutor'))
         except Exception as e:
+            log_error(logger, e, f"Failed to start quiz for user {user_id}")
             flash(f'Failed to start quiz: {e}', 'error')
             return redirect(url_for('dashboard'))
 
