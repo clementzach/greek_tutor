@@ -54,16 +54,14 @@
     {% endif %}
     <form method="post" class="inline" id="quiz-form" style="margin-top:.5rem;">
       {% if quiz.awaiting_next %}
-        <input type="hidden" name="action" value="next_question">
         <div style="display:flex; gap:.5rem;">
-          <button type="submit">Next</button>
+          <button type="submit" name="action" value="next_question">Next</button>
           <button type="submit" name="action" value="end_quiz">End Quiz</button>
         </div>
       {% else %}
-        <input type="hidden" name="action" value="answer_quiz">
         <textarea name="message" id="quiz-answer" rows="2" placeholder="Type your answer and press Enter (Shift+Enter newline)"></textarea>
         <div style="display:flex; gap:.5rem;">
-          <button type="submit">Submit Answer</button>
+          <button type="submit" name="action" value="answer_quiz">Submit Answer</button>
           <button type="submit" name="action" value="end_quiz">End Quiz</button>
         </div>
       {% endif %}

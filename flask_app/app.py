@@ -262,8 +262,9 @@ def create_app():
             action = request.form.get('action', '').strip()
             user_text = request.form.get('message', '').strip()
             try:
-                if action == 'end_quiz' and quiz_active:
-                    logger.info(f"User {user_id} ending quiz")
+                # Check for end_quiz first - it can come from either state (awaiting_next or answering)
+                if action == 'end_quiz':
+                    logger.info(f"User {user_id} ending quiz early")
                     summary = agent.tool_end_quiz()
                     flash(f"Quiz ended. Score: {summary.get('correct', 0)}/{summary.get('asked', 0)}.", 'success')
                 elif action == 'next_question' and quiz_active:
@@ -275,7 +276,7 @@ def create_app():
                         logger.info(f"User {user_id} completed quiz")
                         summary = agent.tool_end_quiz()
                         flash(f"Quiz complete. Score: {summary.get('correct', 0)}/{summary.get('total', 0)}.", 'success')
-                elif quiz_active and (quiz.get('current') or {}).get('token') and user_text and not quiz.get('awaiting_next'):
+                elif action == 'answer_quiz' and quiz_active and user_text:
                     # Grade answer - don't auto-advance
                     logger.debug(f"Grading quiz answer for user {user_id}")
                     result = agent.tool_grade_quiz_answer(user_text)
