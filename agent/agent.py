@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
+import tiktoken
 
 import urllib.request
 import urllib.parse
@@ -65,6 +66,22 @@ class GreekTutorAgent:
         self.fastapi_url = fastapi_url or os.environ.get('FASTAPI_URL', 'http://localhost:8000')
         self.memory = load_memory(user_id)
         self._last_user_text: str = ""
+        # Initialize token encoder for context management
+        try:
+            self.token_encoder = tiktoken.encoding_for_model(model)
+        except KeyError:
+            # Fallback to a common encoding if model-specific one isn't found
+            self.token_encoder = tiktoken.get_encoding("cl100k_base")
+        # Context window sizes for different models
+        self.context_limits = {
+            "gpt-4o-mini": 128000,
+            "gpt-4o": 128000,
+            "gpt-4": 8192,
+            "gpt-3.5-turbo": 16385,
+        }
+        self.max_context_tokens = self.context_limits.get(model, 128000)
+        # Use 50% of context for conversation history
+        self.history_token_budget = self.max_context_tokens // 2
         logger.debug(f"GreekTutorAgent initialized for user {user_id} with model {model}")
         # one-time migration from single-chat to sessions
         if self.memory.get('sessions') is None:
@@ -212,10 +229,26 @@ class GreekTutorAgent:
                 interests = []
                 recent_summaries = []
 
+            # Get current conversation context
+            current_conversation = []
+            active_sid = mem.get('active_session_id')
+            if active_sid:
+                active_sess = next((s for s in mem.get('sessions', []) if s.get('id') == active_sid), None)
+                if active_sess:
+                    messages = active_sess.get('messages', [])
+                    # Get last 10 messages for context (5 exchanges)
+                    for msg in messages[-10:]:
+                        role = msg.get('role', 'unknown')
+                        content = msg.get('content', '')
+                        # Truncate very long messages to avoid token overflow
+                        if len(content) > 500:
+                            content = content[:500] + "..."
+                        current_conversation.append(f"{role}: {content}")
+
             # Ask LLM to generate flashcards
             prompt = self._build_concept_generation_prompt(user_request, count, level,
                                                            mastered_concepts, interests,
-                                                           recent_summaries)
+                                                           recent_summaries, current_conversation)
 
             logger.debug(f"Calling OpenAI to generate flashcards")
             r = self.client.chat.completions.create(
@@ -288,7 +321,7 @@ class GreekTutorAgent:
 
     def _build_concept_generation_prompt(self, user_request: str, count: int, level: str,
                                           mastered_concepts: List[str], interests: List[Dict],
-                                          recent_summaries: List[str]) -> str:
+                                          recent_summaries: List[str], current_conversation: List[str] = None) -> str:
         """Build context-aware LLM prompt for generating concept flashcards."""
 
         # Build user context
@@ -312,18 +345,33 @@ class GreekTutorAgent:
 
         context_block = "\n".join(context_parts)
 
+        # Build conversation context if available
+        conversation_block = ""
+        if current_conversation:
+            conversation_block = f"""
+
+RECENT CONVERSATION (use this to understand what the student has been learning and what they need):
+{chr(10).join(current_conversation)}
+"""
+
         return f"""You are an expert Biblical Greek pedagogy advisor. A student wants to practice Greek grammar/morphology.
 
 STUDENT CONTEXT:
 {context_block}
-
+{conversation_block}
 STUDENT REQUEST: "{user_request}"
 
 TASK: Generate {count} flashcards that intelligently match the student's request, taking into account:
-1. Their current level (adjust difficulty appropriately)
-2. What they've already mastered (build on it, don't repeat basics if they're advanced)
-3. Their interests (use relevant vocabulary when possible)
-4. The specific request (interpret flexibly - if they ask for "aorist", include aorist tense cards; if "dative case", focus on that)
+1. The RECENT CONVERSATION context - this is CRITICAL! Look at what the student and tutor have been discussing to understand exactly what concepts, verses, or vocabulary are relevant
+2. Their current level (adjust difficulty appropriately)
+3. What they've already mastered (build on it, don't repeat basics if they're advanced)
+4. Their interests (use relevant vocabulary when possible)
+5. The specific request (interpret flexibly - if they ask for "aorist", include aorist tense cards; if "dative case", focus on that)
+
+IMPORTANT: If the conversation shows the student has been working on specific verses, words, or concepts, generate flashcards that directly relate to those! For example:
+- If they've been studying John 3:16, use words from that verse
+- If they've been learning about the aorist tense, focus on aorist forms they've seen
+- If they've been discussing participles, create flashcards with the participles from their conversation
 
 FLASHCARD FORMAT:
 Each flashcard must include:
@@ -821,6 +869,85 @@ Return JSON only:
         )
         return r.choices[0].message.content or ""
 
+    def tool_search_verses_by_words(self, words: List[str], match_mode: str = "any",
+                                     limit: int = 20, normalize: bool = True) -> List[Dict[str, Any]]:
+        """
+        Search for NT verses containing specific Greek words.
+        Useful for finding examples of how words appear in different grammatical forms.
+
+        Args:
+            words: List of Greek words to search for (e.g., ['λόγος', 'θεός'])
+            match_mode: 'any' (verses with any of the words) or 'all' (verses with all words)
+            limit: Maximum number of verses to return
+            normalize: Whether to strip diacritics for matching (recommended)
+
+        Returns:
+            List of matching verses with book, chapter, verse, and Greek text
+        """
+        from .bible import tokenize_grc
+
+        logger.info(f"Searching verses for words: {words}, mode: {match_mode}")
+
+        # Load GNT dataset
+        data = load_gnt()
+        if not data:
+            data = load_gnt_samples_as_full()
+        if not data:
+            return []
+
+        # Normalize search words if requested
+        search_words = []
+        for w in words:
+            w_clean = w.strip().lower()
+            if normalize:
+                w_clean = strip_diacritics(w_clean)
+            if w_clean:
+                search_words.append(w_clean)
+
+        if not search_words:
+            return []
+
+        # Search through verses
+        matches = []
+        for row in data:
+            text_grc = row.get('text_grc', '')
+            if not text_grc:
+                continue
+
+            # Tokenize the verse
+            tokens = tokenize_grc(text_grc, normalize=normalize)
+            token_set = set(tokens)
+
+            # Check match criteria
+            if match_mode == "all":
+                # All search words must be present
+                if all(w in token_set for w in search_words):
+                    matches.append({
+                        'book': row.get('book'),
+                        'chapter': row.get('chapter'),
+                        'verse': row.get('verse'),
+                        'text_grc': text_grc,
+                        'matched_words': [w for w in search_words if w in token_set]
+                    })
+            else:  # "any"
+                # At least one search word must be present
+                matched = [w for w in search_words if w in token_set]
+                if matched:
+                    matches.append({
+                        'book': row.get('book'),
+                        'chapter': row.get('chapter'),
+                        'verse': row.get('verse'),
+                        'text_grc': text_grc,
+                        'matched_words': matched
+                    })
+
+            # Stop if we've reached the limit
+            if len(matches) >= limit:
+                break
+
+        logger.info(f"Found {len(matches)} matching verses")
+        return matches
+
     def tool_insert_user_interest(self, interest_type: str, topic: Optional[str] = None,
                                   book: Optional[str] = None, chapter: Optional[int] = None,
                                   passage_ref: Optional[str] = None) -> str:
@@ -1233,6 +1360,40 @@ Return JSON only:
             {
                 "type": "function",
                 "function": {
+                    "name": "search_verses_by_words",
+                    "description": "Search for NT verses containing specific Greek words. Useful for showing students how a word appears in different grammatical forms (e.g., different cases for nouns, different tenses for verbs). Examples: search for λόγος to see nominative/genitive/accusative uses, search for λύω to see present/aorist/future forms. Returns verses with the matched words highlighted.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "words": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of Greek words to search for (normalized, diacritics will be stripped)"
+                            },
+                            "match_mode": {
+                                "type": "string",
+                                "enum": ["any", "all"],
+                                "default": "any",
+                                "description": "'any' returns verses with at least one word, 'all' returns only verses containing all words"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "default": 20,
+                                "description": "Maximum number of verses to return"
+                            },
+                            "normalize": {
+                                "type": "boolean",
+                                "default": True,
+                                "description": "Strip diacritics for matching (recommended)"
+                            }
+                        },
+                        "required": ["words"]
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "insert_user_interest",
                     "description": "Record a user's interest (topic/book/chapter/passage).",
                     "parameters": {
@@ -1377,6 +1538,13 @@ Return JSON only:
                 arguments.get('ref', ''), arguments.get('book', ''), arguments.get('chapter'), arguments.get('verses'))})
         if name == 'explain_verse_alignment':
             return json.dumps({"explanation": self.tool_explain_verse_alignment(arguments.get('ref', ''))})
+        if name == 'search_verses_by_words':
+            return json.dumps({"verses": self.tool_search_verses_by_words(
+                words=arguments.get('words', []),
+                match_mode=arguments.get('match_mode', 'any'),
+                limit=arguments.get('limit', 20),
+                normalize=arguments.get('normalize', True)
+            )})
         if name == 'start_quiz':
             return json.dumps(self.tool_start_quiz(
                 arguments.get('mode', 'global'), int(arguments.get('count', 10)), arguments.get('book'), arguments.get('chapter'), bool(arguments.get('normalize', True))
@@ -1423,6 +1591,13 @@ Return JSON only:
             "You can call tools to explain concepts, show Greek NT examples, retrieve/store vocab progress, record interests, and run a lightweight vocab quiz. "
             "Quiz flow: when the user asks to be quizzed, call start_quiz with appropriate scope, then next_quiz_question, then on user reply call grade_quiz_answer, then either next_quiz_question or end_quiz if done. "
             "Only call set_user_level if the user explicitly requests a level change. Do not infer from quiz answers.\n\n"
+            "IMPORTANT - Teaching with Examples:\n"
+            "- When explaining grammatical forms (cases, tenses, moods, voices), use search_verses_by_words to find real NT examples.\n"
+            "- For noun case questions: search for the noun lemma and show verses where it appears in different cases (e.g., λόγος in nominative vs genitive)\n"
+            "- For verb tense/mood questions: search for the verb lemma and show verses with different tenses (e.g., λύω in present, aorist, future)\n"
+            "- For participle questions: search for participle forms to show how they're used in context\n"
+            "- Examples: 'Show me examples of λόγος in the genitive' → search_verses_by_words(['λογου']); "
+            "'How does ἔρχομαι appear in aorist?' → search_verses_by_words(['ηλθον', 'ηλθεν'])\n\n"
             "IMPORTANT - Proactive Guidance:\n"
             "- When a user completes a concept explanation, call insert_concept_mastery to track their progress.\n"
             "- When appropriate (e.g., user asks 'what should I learn next?', completes a quiz, seems stuck, or finishes a lesson), "
