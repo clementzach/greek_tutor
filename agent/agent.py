@@ -1608,11 +1608,54 @@ Return JSON only:
         level = self.memory.get('level')
         memory_preamble = f"Student level: {level}." if level else "Student level unknown; you may ask."
         self._last_user_text = user_text or ""
+
+        # Build messages list starting with system message and level preamble
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": memory_preamble},
-            {"role": "user", "content": user_text},
         ]
+
+        # Load conversation history from active session
+        sid = self.memory.get('active_session_id')
+        if sid:
+            active_session = next((s for s in self.memory.get('sessions', []) if s.get('id') == sid), None)
+            if active_session:
+                session_messages = active_session.get('messages', [])
+
+                # Estimate tokens for system + preamble + current message
+                system_tokens = len(self.token_encoder.encode(system))
+                preamble_tokens = len(self.token_encoder.encode(memory_preamble))
+                current_tokens = len(self.token_encoder.encode(user_text))
+                base_tokens = system_tokens + preamble_tokens + current_tokens
+
+                # Calculate remaining token budget for history
+                remaining_budget = self.history_token_budget - base_tokens
+
+                # Add messages from newest to oldest until we hit the budget
+                history_to_include = []
+                total_history_tokens = 0
+
+                for msg in reversed(session_messages):
+                    msg_content = msg.get('content', '')
+                    msg_tokens = len(self.token_encoder.encode(msg_content))
+
+                    if total_history_tokens + msg_tokens > remaining_budget:
+                        break
+
+                    history_to_include.insert(0, msg)
+                    total_history_tokens += msg_tokens
+
+                # Add the selected history messages
+                for msg in history_to_include:
+                    messages.append({
+                        "role": msg.get('role'),
+                        "content": msg.get('content', '')
+                    })
+
+                logger.debug(f"Loaded {len(history_to_include)}/{len(session_messages)} messages from session {sid} for user {self.user_id} (using {total_history_tokens} tokens)")
+
+        # Add the current user message
+        messages.append({"role": "user", "content": user_text})
 
         # Re-usable loop to process tool calls
         for iteration in range(3):

@@ -109,6 +109,10 @@
   <textarea name="message" id="chat-message" rows="3" placeholder="Ask about a concept or practice vocab... (Shift+Enter for newline)"></textarea>
   <button type="submit" id="chat-send-btn">Send</button>
 </form>
+<div id="loading-indicator" style="display:none; text-align:center; margin:1rem 0;">
+  <div class="loading-spinner"></div>
+  <div style="margin-top:0.5rem; color:#666;">Thinking...</div>
+</div>
 <script>
   // Auto-scroll to bottom of chat on page load
   (function(){
@@ -150,29 +154,114 @@
 
     // Also scroll after images load (in case there are any in markdown)
     window.addEventListener('load', function() { scrollToBottom(false); });
+
+    // Expose scrollToBottom for use by chat handler
+    window.scrollChatToBottom = scrollToBottom;
   })();
 
   (function(){
     const form = document.getElementById('chat-form');
     const ta = document.getElementById('chat-message');
     const sendBtn = document.getElementById('chat-send-btn');
+    const chatDiv = document.querySelector('.chat');
+    const loadingIndicator = document.getElementById('loading-indicator');
+    const suggestionCards = document.querySelector('.suggestion-cards');
     let isSubmitting = false;
 
-    if (form && ta && sendBtn) {
-      // Prevent multiple submissions
-      form.addEventListener('submit', function(e){
+    if (form && ta && sendBtn && chatDiv) {
+      // Prevent multiple submissions and handle via AJAX
+      form.addEventListener('submit', async function(e){
+        e.preventDefault(); // Always prevent default form submission
+
         if (isSubmitting) {
-          e.preventDefault();
           return false;
         }
+
+        const message = ta.value.trim();
+        if (!message) {
+          return false;
+        }
+
         isSubmitting = true;
         sendBtn.disabled = true;
         sendBtn.textContent = 'Sending...';
         sendBtn.style.opacity = '0.6';
         sendBtn.style.cursor = 'not-allowed';
 
-        // Store scroll position intent before submit
-        sessionStorage.setItem('scrollToBottom', 'true');
+        // Hide suggestion cards if present
+        if (suggestionCards) {
+          suggestionCards.style.display = 'none';
+        }
+
+        // Add user message to chat immediately
+        const userMsgDiv = document.createElement('div');
+        userMsgDiv.className = 'msg user';
+        userMsgDiv.innerHTML = '<div class="role">user</div><div class="content markdown"><p>' + escapeHtml(message) + '</p></div>';
+        chatDiv.appendChild(userMsgDiv);
+
+        // Clear input
+        ta.value = '';
+
+        // Show loading indicator
+        if (loadingIndicator) {
+          loadingIndicator.style.display = 'block';
+        }
+
+        // Scroll to show user message
+        if (window.scrollChatToBottom) {
+          window.scrollChatToBottom(true);
+        }
+
+        try {
+          // Send message via AJAX
+          const response = await fetch('{{ url_for("chat_api") }}', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ message: message })
+          });
+
+          if (!response.ok) {
+            throw new Error('Failed to send message');
+          }
+
+          const data = await response.json();
+
+          // Hide loading indicator
+          if (loadingIndicator) {
+            loadingIndicator.style.display = 'none';
+          }
+
+          if (data.success && data.assistant_reply_html) {
+            // Add assistant message to chat
+            const assistantMsgDiv = document.createElement('div');
+            assistantMsgDiv.className = 'msg assistant';
+            assistantMsgDiv.innerHTML = '<div class="role">assistant</div><div class="content markdown">' + data.assistant_reply_html + '</div>';
+            chatDiv.appendChild(assistantMsgDiv);
+
+            // Scroll to show assistant message
+            if (window.scrollChatToBottom) {
+              window.scrollChatToBottom(true);
+            }
+          } else if (data.error) {
+            alert('Error: ' + data.error);
+          }
+        } catch (error) {
+          console.error('Error sending message:', error);
+          alert('Failed to send message. Please try again.');
+
+          // Hide loading indicator
+          if (loadingIndicator) {
+            loadingIndicator.style.display = 'none';
+          }
+        } finally {
+          isSubmitting = false;
+          sendBtn.disabled = false;
+          sendBtn.textContent = 'Send';
+          sendBtn.style.opacity = '1';
+          sendBtn.style.cursor = 'pointer';
+        }
       });
 
       ta.addEventListener('keydown', function(e){
@@ -188,6 +277,13 @@
           }
         }
       });
+    }
+
+    // Helper function to escape HTML
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
     }
   })();
   (function(){
@@ -286,11 +382,10 @@
 
         if (message) {
           chatInput.value = message;
-          console.log('Submitting form...');
-          // Use setTimeout to ensure the form isn't blocked by isSubmitting
-          setTimeout(function() {
-            chatForm.submit();
-          }, 10);
+          console.log('Triggering form submission...');
+          // Trigger the form's submit event to use AJAX handler
+          const submitEvent = new Event('submit', { cancelable: true, bubbles: true });
+          chatForm.dispatchEvent(submitEvent);
         }
       };
 

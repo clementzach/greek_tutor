@@ -691,6 +691,43 @@ def create_app():
             pass
         return ('', 204)
 
+    @app.post('/chat')
+    @login_required
+    def chat_api():
+        """AJAX endpoint for chat messages that returns JSON instead of full page reload"""
+        user_id = session['user_id']
+        user_text = request.json.get('message', '').strip()
+
+        if not user_text:
+            return {'error': 'No message provided'}, 400
+
+        try:
+            logger.info(f"Chat API message from user {user_id}: {user_text[:50]}...")
+            agent = GreekTutorAgent(user_id=user_id)
+            reply = agent.chat(user_text)
+
+            # Render markdown for the reply
+            allowed_tags = set(bleach.sanitizer.ALLOWED_TAGS).union({
+                'p','pre','code','h1','h2','h3','h4','h5','h6','table','thead','tbody','tr','th','td',
+                'ul','ol','li','em','strong','hr','br','blockquote'
+            })
+            allowed_attrs = {
+                'a': ['href', 'title', 'rel', 'target'],
+                'th': ['align'], 'td': ['align']
+            }
+            html = md.markdown(reply or '', extensions=['fenced_code', 'tables', 'sane_lists', 'nl2br'])
+            clean_html = bleach.clean(html, tags=allowed_tags, attributes=allowed_attrs, strip=True)
+
+            return {
+                'success': True,
+                'user_message': user_text,
+                'assistant_reply': reply,
+                'assistant_reply_html': clean_html
+            }
+        except Exception as e:
+            log_error(logger, e, f"Error during chat API for user {user_id}")
+            return {'error': str(e)}, 500
+
     return app
 
 
