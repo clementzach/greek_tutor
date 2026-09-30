@@ -579,6 +579,11 @@ Return JSON only:
 
         if not token:
             return {"error": "no current question"}
+        if q.get('awaiting_next') and q.get('last_feedback'):
+            # Already graded (e.g. double submit): return the existing result instead of counting it twice
+            fb = q['last_feedback']
+            return {"verdict": fb.get('verdict'), "explanation": fb.get('explanation'), "asked": q.get('asked', 0),
+                    "correct": q.get('correct', 0), "remaining": len(q.get('queue') or [])}
         ua = (user_answer or "").strip().lower()
 
         # Different grading logic based on question type
@@ -627,14 +632,16 @@ Return JSON only:
                 ],
                 temperature=0.0,
             )
-            verdict = "incorrect"
-            expl = ""
             try:
                 payload = json.loads(r.choices[0].message.content or "{}")
-                verdict = (payload.get('verdict') or 'incorrect').lower()
+                verdict = (payload['verdict']).lower()
+                if verdict not in ('correct', 'partial', 'incorrect'):
+                    raise ValueError(f"unexpected verdict {verdict!r}")
                 expl = payload.get('explanation') or ''
-            except Exception:
-                pass
+            except Exception as e:
+                # Don't mark the user wrong (and reset their card) because grading failed; let them retry
+                logger.error(f"Could not parse grading response for user {self.user_id}: {e}")
+                return {"error": "Could not grade your answer. Please try submitting it again."}
 
         # Update stats
         q['asked'] = int(q.get('asked') or 0) + 1
@@ -681,7 +688,8 @@ Return JSON only:
                     "mastery_delta": mastery_delta,
                 })
         except Exception as e:
-            pass
+            logger.error(f"Failed to save review progress for '{token}' (user {self.user_id}): {e}", exc_info=True)
+            expl = (expl + " " if expl else "") + "(Note: your progress for this card could not be saved.)"
 
         # Store feedback with the answered question for display
         q['last_feedback'] = {
@@ -772,8 +780,12 @@ Return JSON only:
             temperature=0.4,
         )
         summary = (r.choices[0].message.content or '').strip()
+        # Reload: the LLM call is slow and may run in the background, so the chat may have changed meanwhile
+        mem = load_memory(self.user_id)
+        sess = next((s for s in mem.get('sessions', []) if s.get('id') == sid), None)
+        if not sess:
+            return None
         sess['summary'] = summary
-        sess['updated_at'] = datetime.utcnow().isoformat()
         save_memory(self.user_id, mem)
         return summary
 

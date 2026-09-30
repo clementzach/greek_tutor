@@ -290,12 +290,23 @@
     const form = document.getElementById('quiz-form');
     const ta = document.getElementById('quiz-answer');
     if (form && ta) {
+      // Prevent double submission (e.g. double Enter) from grading an answer twice
+      let submitted = false;
+      form.addEventListener('submit', function(e){
+        if (submitted) { e.preventDefault(); return; }
+        submitted = true;
+        setTimeout(function(){
+          form.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
+        }, 0);
+      });
       ta.addEventListener('keydown', function(e){
         if (e.isComposing) return;
         if (e.key === 'Enter') {
           if (e.shiftKey) return;
           e.preventDefault();
-          if (form.requestSubmit) form.requestSubmit(); else form.submit();
+          // Submit via the answer button so the 'action=answer_quiz' value is sent
+          const answerBtn = form.querySelector('button[value="answer_quiz"]');
+          if (answerBtn && form.requestSubmit) form.requestSubmit(answerBtn); else if (answerBtn) answerBtn.click();
         }
       });
     }

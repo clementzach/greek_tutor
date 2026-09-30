@@ -8,6 +8,7 @@ import markdown as md
 import bleach
 import urllib.request
 import urllib.parse
+import threading
 
 from flask import Flask, render_template, request, redirect, url_for, session, flash, Blueprint
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -61,6 +62,25 @@ def get_user_by_username(username: str):
         if u.get('username') == username:
             return u
     return None
+
+
+def summarize_in_background(user_id: str):
+    """Summarize the user's currently active chat without blocking the request.
+
+    The session id is captured now, so a later switch to another chat can't change the target.
+    """
+    mem = load_memory(user_id)
+    sid = mem.get('active_session_id')
+    cur = next((s for s in mem.get('sessions', []) if s.get('id') == sid), None)
+    if not (sid and cur and cur.get('messages')):
+        return
+
+    def run():
+        try:
+            GreekTutorAgent(user_id=user_id).summarize_session(sid)
+        except Exception as e:
+            log_error(logger, e, f"Background summarization for user {user_id}")
+    threading.Thread(target=run, daemon=True).start()
 
 
 def login_required(f):
@@ -139,18 +159,9 @@ def create_app():
     def logout():
         user_id = session.get('user_id', 'unknown')
         logger.info(f"Logout initiated for user: {user_id}")
-        # Try summarizing before logout
-        try:
-            if 'user_id' in session:
-                agent = GreekTutorAgent(user_id=session['user_id'])
-                mem = load_memory(session['user_id'])
-                current_sid = mem.get('active_session_id')
-                cur_sess = next((s for s in mem.get('sessions', []) if s.get('id') == current_sid), None)
-                if current_sid and cur_sess and cur_sess.get('messages'):
-                    agent.summarize_session(current_sid)
-                    logger.debug(f"Session {current_sid} summarized for user {user_id}")
-        except Exception as e:
-            log_error(logger, e, f"Session summarization during logout for user {user_id}")
+        # Summarize in the background so logout is instant
+        if 'user_id' in session:
+            summarize_in_background(session['user_id'])
         session.clear()
         logger.info(f"User logged out: {user_id}")
         return redirect(url_for('login'))
@@ -240,22 +251,15 @@ def create_app():
         sid_param = request.args.get('sid')
         new_param = request.args.get('new')
         if request.method == 'GET':
-            # Summarize current chat before switching/starting new
-            current_mem = load_memory(user_id)
-            current_sid = current_mem.get('active_session_id')
-            if current_sid:
-                try:
-                    # Only summarize if there are messages
-                    cur_sess = next((s for s in current_mem.get('sessions', []) if s.get('id') == current_sid), None)
-                    if cur_sess and cur_sess.get('messages'):
-                        agent.summarize_session(current_sid)
-                except Exception:
-                    pass
-            if sid_param:
+            current_sid = mem.get('active_session_id')
+            has_active = any(s.get('id') == current_sid for s in mem.get('sessions', []))
+            if sid_param and sid_param != current_sid:
+                # Switching chats: summarize the one we're leaving (in the background)
+                summarize_in_background(user_id)
                 agent.set_active_session(sid_param)
-            else:
-                # By default start a new chat when arriving at Tutor
+            elif not sid_param and not has_active:
                 agent.new_session()
+            # Otherwise resume the current chat; a new one is started only via "New Chat"
             mem = load_memory(user_id)
         # Handle POST early for quiz grading or ending
         if request.method == 'POST':
@@ -280,9 +284,9 @@ def create_app():
                     # Grade answer - don't auto-advance
                     logger.debug(f"Grading quiz answer for user {user_id}")
                     result = agent.tool_grade_quiz_answer(user_text)
-                    verdict = result.get('verdict', 'graded')
-                    expl = result.get('explanation') or ''
-                    # Feedback will be stored in quiz state by the agent
+                    if 'error' in result:
+                        flash(result['error'], 'error')
+                    # Feedback is stored in quiz state by the agent
                 else:
                     # Regular chat
                     if user_text:
@@ -290,7 +294,7 @@ def create_app():
                         reply = agent.chat(user_text)
             except Exception as e:
                 log_error(logger, e, f"Error during tutoring for user {user_id}")
-                reply = f"Error during tutoring: {e}"
+                flash(f"Something went wrong: {e}", 'error')
             # Refresh state after handling
             mem = load_memory(user_id)
             quiz = (mem.get('quiz') or {})
@@ -457,15 +461,7 @@ def create_app():
     def new_chat():
         user_id = session['user_id']
         agent = GreekTutorAgent(user_id=user_id)
-        # Summarize current active chat before creating new
-        try:
-            mem = load_memory(user_id)
-            current_sid = mem.get('active_session_id')
-            cur_sess = next((s for s in mem.get('sessions', []) if s.get('id') == current_sid), None)
-            if current_sid and cur_sess and cur_sess.get('messages'):
-                agent.summarize_session(current_sid)
-        except Exception:
-            pass
+        summarize_in_background(user_id)
         agent.new_session()
         return redirect(url_for('tutor'))
 
@@ -664,31 +660,14 @@ def create_app():
     @app.get('/usage')
     @login_required
     def usage():
-        # Summarize active chat when navigating to usage guide
-        try:
-            agent = GreekTutorAgent(user_id=session['user_id'])
-            mem = load_memory(session['user_id'])
-            current_sid = mem.get('active_session_id')
-            cur_sess = next((s for s in mem.get('sessions', []) if s.get('id') == current_sid), None)
-            if current_sid and cur_sess and cur_sess.get('messages'):
-                agent.summarize_session(current_sid)
-        except Exception:
-            pass
+        summarize_in_background(session['user_id'])
         return render_template('usage.html')
 
     @app.post('/autosummarize')
     @login_required
     def autosummarize():
-        # Best-effort: summarize current active chat, used by navigator.sendBeacon on unload
-        try:
-            agent = GreekTutorAgent(user_id=session['user_id'])
-            mem = load_memory(session['user_id'])
-            current_sid = mem.get('active_session_id')
-            cur_sess = next((s for s in mem.get('sessions', []) if s.get('id') == current_sid), None)
-            if current_sid and cur_sess and cur_sess.get('messages'):
-                agent.summarize_session(current_sid)
-        except Exception:
-            pass
+        # Best-effort, used by navigator.sendBeacon on unload
+        summarize_in_background(session['user_id'])
         return ('', 204)
 
     @app.post('/chat')
